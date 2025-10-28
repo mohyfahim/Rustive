@@ -5,14 +5,21 @@ mod utils;
 
 use axum::Extension;
 use axum::Router;
+use axum::extract::Path;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use axum::response::Redirect;
 use axum::routing::get;
+use axum::routing::post;
 use log::{debug, error, info};
 use sea_orm::ActiveModelTrait;
 use sea_orm::ActiveValue::Set;
+use sea_orm::ColumnTrait;
 use sea_orm::DbConn;
+use sea_orm::EntityTrait;
+use sea_orm::QueryFilter;
+use sea_orm::SqlErr;
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use serde::Deserialize;
@@ -114,8 +121,8 @@ async fn main() -> Result<(), RustiveError> {
         return Err(RustiveError::DatabaseError(e));
     }
 
-    // let result = execute_shell_script("./capture.sh", vec![], Duration::from_secs(10)).await?;
-    // debug!("{:?}", result);
+    let result = execute_shell_script("./capture.sh", vec![], Duration::from_secs(10)).await?;
+    debug!("{:?}", result);
 
     let auth_set = Arc::new(RwLock::new(HashSet::<String>::new()));
     let allowed_ips = Arc::new(RwLock::new(HashSet::new()));
@@ -135,7 +142,9 @@ async fn main() -> Result<(), RustiveError> {
         db: conn,
     };
     let app = Router::new()
-        .route("/authorize", get(api_authorize))
+        .route("/", get(show_portal))
+        .route("/{*full_path}", get(show_portal))
+        .route("/authorize", post(api_authorize))
         .with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr)
@@ -171,16 +180,35 @@ async fn api_authorize(
     {
         let mut s = state.authorized_macs.write().await;
         if s.insert(mac.clone()) {
-            let client_active = entity::client::ActiveModel {
-                mac_addr: Set(Some(mac.clone())),
-                ..Default::default()
-            };
-            if let Err(e) = client_active.save(&state.db).await {
+            let client = entity::client::Entity::find()
+                .filter(entity::client::Column::MacAddr.eq(mac.clone()))
+                .one(&state.db)
+                .await;
+            if let Err(e) = client {
                 error!("DB Error: {}", e);
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     axum::Json(serde_json::json!({"status":"false","mac":mac})),
                 );
+            }
+            let possible_client = client.unwrap();
+            if possible_client.is_none() {
+                error!("DB Error: client is None");
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({"message":"Client doesn't exist"})),
+                );
+            } else {
+                let mut client_active: entity::client::ActiveModel =
+                    possible_client.unwrap().into();
+                client_active.auth = Set(true);
+                if let Err(e) = client_active.update(&state.db).await {
+                    error!("DB Error: {}", e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(serde_json::json!({"status":"false","mac":mac})),
+                    );
+                }
             }
         }
     }
@@ -199,6 +227,14 @@ async fn api_authorize(
 
     (
         StatusCode::OK,
-        axum::Json(serde_json::json!({"status":"ok","mac":mac})),
+        axum::Json(serde_json::json!({"result": {"mac": mac}})),
     )
+}
+
+async fn show_portal(
+    _state: State<AppState>,
+    full_path: Option<Path<String>>,
+) -> impl IntoResponse {
+    debug!("full path is {full_path:?}");
+    (StatusCode::FOUND, [("Location", "https://podbox.plus")])
 }

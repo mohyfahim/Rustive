@@ -4,10 +4,16 @@ meta {
   seq: 1
 }
 
-get {
+post {
   url: http://localhost:8090/authorize
-  body: none
+  body: json
   auth: inherit
+}
+
+body:json {
+  {
+    "mac": "11:22:33:44:55:77"
+  }
 }
 
 settings {
