@@ -1,0 +1,9 @@
+{
+  "version": "1",
+  "name": "rustive",
+  "type": "collection",
+  "ignore": [
+    "node_modules",
+    ".git"
+  ]
+}

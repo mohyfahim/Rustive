@@ -12,8 +12,8 @@ impl MigrationTrait for Migration {
                     .table(Client::Table)
                     .if_not_exists()
                     .col(pk_auto(Client::Id))
-                    .col(string_null(Client::IPAddr))
-                    .col(string_null(Client::MACAddr))
+                    .col(string_null(Client::IPAddr).default(""))
+                    .col(string_null(Client::MACAddr).default(""))
                     .col(boolean(Client::Auth).default(false))
                     .to_owned(),
             )
