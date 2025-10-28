@@ -1,3 +1,5 @@
+mod errors;
+mod migration;
 mod utils;
 
 use axum::Extension;
@@ -6,6 +8,9 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use log::debug;
 use log::info;
+use sea_orm::DbConn;
+use sea_orm::{Database, DatabaseConnection};
+use sea_orm_migration::MigratorTrait;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -16,8 +21,8 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 
+use crate::errors::RustiveError;
 use crate::utils::execute_shell_script;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Config {
     listen_addr: String,
@@ -55,33 +60,48 @@ struct AppState {
     allowed_hosts: Arc<RwLock<HashSet<String>>>,
 }
 
+// async fn capture_all_traffics()  ->
+
+// async fn setup_schema(db: &DbConn) -> Result<(), RustiveError> {
+//     db.get_schema_builder()
+// }
+
 #[tokio::main]
-async fn main() -> io::Result<()> {
+async fn main() -> Result<(), RustiveError> {
     env_logger::init();
     info!("Rustive Program is Starting");
 
-    let result = execute_shell_script("./capture.sh", vec![], Duration::from_secs(10)).await?;
-    debug!("{:?}", result);
-
-    let config = Config::default();
-    let auth_set = Arc::new(RwLock::new(HashSet::new()));
-    let allowed_ips = Arc::new(RwLock::new(HashSet::new()));
-    for ip in &config.allowed_ips {
-        allowed_ips.write().await.insert(ip.clone());
+    let conn = Database::connect("sqlite://db.db?mode=rwc")
+        .await
+        .expect("Database Connection Failed");
+    if let Err(e) = migration::Migrator::up(&conn, None).await {
+        return Err(RustiveError::DatabaseError(e));
     }
-    let allowed_hosts = Arc::new(RwLock::new(HashSet::new()));
-    for h in &config.allowed_hosts {
-        allowed_hosts.write().await.insert(h.clone());
+    if let Err(e) = conn.close().await {
+        return Err(RustiveError::DatabaseError(e));
     }
+    // let result = execute_shell_script("./capture.sh", vec![], Duration::from_secs(10)).await?;
+    // debug!("{:?}", result);
 
-    let state = AppState {
-        config: config.clone(),
-        authorized_macs: auth_set.clone(),
-        allowed_ips: allowed_ips.clone(),
-        allowed_hosts: allowed_hosts.clone(),
-    };
-    let shared_state = Extension(state.clone());
-    let app = Router::new().route("/authorize", get(api_authorize));
+    // let config = Config::default();
+    // let auth_set = Arc::new(RwLock::new(HashSet::new()));
+    // let allowed_ips = Arc::new(RwLock::new(HashSet::new()));
+    // for ip in &config.allowed_ips {
+    //     allowed_ips.write().await.insert(ip.clone());
+    // }
+    // let allowed_hosts = Arc::new(RwLock::new(HashSet::new()));
+    // for h in &config.allowed_hosts {
+    //     allowed_hosts.write().await.insert(h.clone());
+    // }
+
+    // let state = AppState {
+    //     config: config.clone(),
+    //     authorized_macs: auth_set.clone(),
+    //     allowed_ips: allowed_ips.clone(),
+    //     allowed_hosts: allowed_hosts.clone(),
+    // };
+    // let shared_state = Extension(state.clone());
+    // let app = Router::new().route("/authorize", get(api_authorize));
     Ok(())
 }
 
@@ -90,35 +110,35 @@ struct AuthReq {
     mac: String,
 }
 
-async fn api_authorize(
-    Extension(state): Extension<AppState>,
-    axum::Json(payload): axum::Json<AuthReq>,
-) -> impl IntoResponse {
-    let mac = payload.mac.to_lowercase();
-    // basic normalization
-    let mac = mac.replace("-", ":");
+// async fn api_authorize(
+//     Extension(state): Extension<AppState>,
+//     axum::Json(payload): axum::Json<AuthReq>,
+// ) -> impl IntoResponse {
+//     let mac = payload.mac.to_lowercase();
+//     // basic normalization
+//     let mac = mac.replace("-", ":");
 
-    // persist
-    {
-        let mut s = state.authorized_macs.write().await;
-        if s.insert(mac.clone()) {
-            // if let Err(e) = persist_db(&state.config.db_path, &s) {
-            //     error!("Failed to persist db: {}", e);
-            // }
-        }
-    }
+//     // persist
+//     {
+//         let mut s = state.authorized_macs.write().await;
+//         if s.insert(mac.clone()) {
+//             // if let Err(e) = persist_db(&state.config.db_path, &s) {
+//             //     error!("Failed to persist db: {}", e);
+//             // }
+//         }
+//     }
 
-    // run iptables rule to allow traffic from this mac on FORWARD chain
-    // WARNING: This uses `iptables` and requires root.
-    let iface = &state.config.lan_iface;
-    let mac_clone = mac.clone();
-    tokio::spawn(async move {
-        if let Err(e) = add_iptables_allow(&mac_clone, iface).await {
-            error!("Failed to run iptables for {}: {}", mac_clone, e);
-        } else {
-            info!("Added iptables rule to allow MAC {}", mac_clone);
-        }
-    });
+//     // run iptables rule to allow traffic from this mac on FORWARD chain
+//     // WARNING: This uses `iptables` and requires root.
+//     let iface = &state.config.lan_iface;
+//     let mac_clone = mac.clone();
+//     tokio::spawn(async move {
+//         if let Err(e) = add_iptables_allow(&mac_clone, iface).await {
+//             error!("Failed to run iptables for {}: {}", mac_clone, e);
+//         } else {
+//             info!("Added iptables rule to allow MAC {}", mac_clone);
+//         }
+//     });
 
-    axum::Json(serde_json::json!({"status":"ok","mac":mac}))
-}
+//     axum::Json(serde_json::json!({"status":"ok","mac":mac}))
+// }

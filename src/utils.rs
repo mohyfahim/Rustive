@@ -5,6 +5,8 @@ use tokio::process::Command;
 use tokio::select;
 use tokio::time::{self, Duration};
 
+use crate::errors::RustiveError;
+
 /// Executes a shell script asynchronously with the given arguments and timeout.
 ///
 /// Assumes the script is executable (e.g., has execute permissions and a shebang like #!/bin/sh).
@@ -23,7 +25,7 @@ pub async fn execute_shell_script(
     script_path: &str,
     args: Vec<String>,
     timeout_duration: Duration,
-) -> io::Result<Output> {
+) -> Result<Output, RustiveError> {
     let mut cmd = Command::new(script_path);
     cmd.args(args);
     cmd.stdout(Stdio::piped());
@@ -53,7 +55,7 @@ pub async fn execute_shell_script(
                 Err(e) => {
                     let _ = read_stdout.await;
                     let _ = read_stderr.await;
-                    return Err(e);
+                    return Err(RustiveError::CommandExecutionFailed(script_path.to_string()));
                 }
             }
         }
@@ -64,7 +66,7 @@ pub async fn execute_shell_script(
             // Await reads to clean up, even though we're not using the output
             let _ = read_stdout.await;
             let _ = read_stderr.await;
-            return Err(io::Error::new(ErrorKind::TimedOut, "Execution timed out"));
+            return Err(RustiveError::Timeout);
         }
     };
 
