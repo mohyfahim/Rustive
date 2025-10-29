@@ -412,10 +412,13 @@ async fn api_dhcp(
             let client_auth: bool = client_active.auth.clone().take().unwrap();
             debug!("The client is not new: {}", client_auth);
             if client_auth == true {
-                let result =
-                    execute_shell_script("./white_list.sh", vec![], Duration::from_secs(10))
-                        .await?;
-                debug!("{:?}", result);
+                #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+                {
+                    let result =
+                        execute_shell_script("./white_list.sh", vec![], Duration::from_secs(10))
+                            .await;
+                    debug!("{:?}", result);
+                }
             }
             client_active.ip_addr = Set(Some(ip.clone()));
             if let Err(e) = client_active.update(&state.db).await {
