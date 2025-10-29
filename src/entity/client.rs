@@ -10,6 +10,7 @@ pub struct Model {
     pub ip_addr: Option<String>,
     pub mac_addr: Option<String>,
     pub auth: bool,
+    pub watch_portal: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

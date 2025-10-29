@@ -1,0 +1,23 @@
+meta {
+  name: dhcp add client
+  type: http
+  seq: 4
+}
+
+post {
+  url: http://localhost:8090/dhcp
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "mac": "11:22:33:44:55:77",
+    "ip": "192.168.2.1",
+    "action": "add"
+  }
+}
+
+settings {
+  encodeUrl: true
+}

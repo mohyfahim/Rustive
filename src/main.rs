@@ -24,6 +24,9 @@ use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+use tokio::time::sleep;
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -71,6 +74,7 @@ struct AppState {
     allowed_ips: Arc<RwLock<HashSet<String>>>,
     allowed_hosts: Arc<RwLock<HashSet<String>>>,
     db: DatabaseConnection,
+    pending_authorizations: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
 }
 
 // async fn capture_all_traffics()  ->
@@ -122,8 +126,11 @@ async fn main() -> Result<(), RustiveError> {
         return Err(RustiveError::DatabaseError(e));
     }
 
-    let result = execute_shell_script("./capture.sh", vec![], Duration::from_secs(10)).await?;
-    debug!("{:?}", result);
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+    {
+        let result = execute_shell_script("./capture.sh", vec![], Duration::from_secs(10)).await?;
+        debug!("{:?}", result);
+    }
 
     let auth_set = Arc::new(RwLock::new(HashSet::<String>::new()));
     let allowed_ips = Arc::new(RwLock::new(HashSet::new()));
@@ -135,12 +142,16 @@ async fn main() -> Result<(), RustiveError> {
         allowed_hosts.write().await.insert(h.clone());
     }
 
+    let pending_map: Arc<Mutex<HashMap<String, JoinHandle<()>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
     let state = AppState {
         config: config.clone(),
         authorized_macs: auth_set.clone(),
         allowed_ips: allowed_ips.clone(),
         allowed_hosts: allowed_hosts.clone(),
         db: conn,
+        pending_authorizations: pending_map.clone(),
     };
     let app = Router::new()
         .route("/", get(show_portal))
@@ -178,6 +189,15 @@ async fn api_authorize(
     let mac = payload.mac.to_lowercase();
     // basic normalization
     let mac = mac.replace("-", ":");
+
+    // cancel any pending timer for this mac
+    {
+        let mut pending = state.pending_authorizations.lock().await;
+        if let Some(handle) = pending.remove(&mac) {
+            debug!("Canceling pending authorization timer for {}", mac);
+            handle.abort();
+        }
+    }
 
     {
         let mut s = state.authorized_macs.write().await;
@@ -233,6 +253,98 @@ async fn api_authorize(
     )
 }
 
+async fn start_authorization_timer(state: State<AppState>, mac: String, ip: String) {
+    // Cancel any existing pending timer for this mac and replace with a fresh one
+    {
+        let mut pending = state.pending_authorizations.lock().await;
+        if let Some(old_handle) = pending.remove(&mac) {
+            debug!("Aborting previous pending timer for {}", mac);
+            old_handle.abort();
+        }
+
+        // Clone what we need into the spawned task
+        let state_for_task = state.clone();
+        let mac_for_task = mac.clone();
+        let ip_for_task = ip.clone();
+
+        let handle: JoinHandle<()> = tokio::spawn(async move {
+            // Wait 15 seconds
+            sleep(Duration::from_secs(15)).await;
+
+            // // If authorization already happened while sleeping, bail out
+            // {
+            //     let s = state_for_task.authorized_macs.read().await;
+            //     if s.contains(&mac_for_task) {
+            //         debug!(
+            //             "{} was authorized during timer, exiting timer.",
+            //             mac_for_task
+            //         );
+            //         // remove pending entry (cleanup)
+            //         let mut pending = state_for_task.pending_authorizations.lock().await;
+            //         pending.remove(&mac_for_task);
+            //         return;
+            //     }
+            // }
+
+            // Not authorized -> perform auto-authorization: update DB + set in memory set
+            info!("Auto-authorizing MAC {} after timer expiry", mac_for_task);
+            let client = entity::client::Entity::find()
+                .filter(entity::client::Column::MacAddr.eq(mac_for_task.clone()))
+                .one(&state_for_task.db)
+                .await;
+
+            match client {
+                Ok(Some(existing)) => {
+                    let mut am: entity::client::ActiveModel = existing.into();
+                    am.auth = Set(true);
+                    if let Err(e) = am.update(&state_for_task.db).await {
+                        error!(
+                            "DB error when auto-authorizing (update) {}: {}",
+                            mac_for_task, e
+                        );
+                    }
+                }
+                Ok(None) => {
+                    // create a new client record with auth = true
+                    // let new_client = entity::client::ActiveModel {
+                    //     mac_addr: Set(Some(mac_for_task.clone())),
+                    //     ip_addr: Set(Some(ip_for_task.clone())),
+                    //     auth: Set(true),
+                    //     ..Default::default()
+                    // };
+                    // if let Err(e) = new_client.save(&state_for_task.db).await {
+                    //     error!(
+                    //         "DB error when auto-authorizing (insert) {}: {}",
+                    //         mac_for_task, e
+                    //     );
+                    // }
+                    error!("client does not exists in DB");
+                }
+                Err(e) => {
+                    error!(
+                        "DB error when looking up client for auto-authorize {}: {}",
+                        mac_for_task, e
+                    );
+                }
+            }
+
+            // // Mark in-memory authorized_macs
+            // {
+            //     let mut s = state_for_task.authorized_macs.write().await;
+            //     s.insert(mac_for_task.clone());
+            // }
+
+            // cleanup pending map entry
+            let mut pending = state_for_task.pending_authorizations.lock().await;
+            pending.remove(&mac_for_task);
+            info!("Auto-authorization complete for {}", mac_for_task);
+        });
+
+        // Insert the handle into the pending map
+        pending.insert(mac, handle);
+    }
+}
+
 #[derive(Deserialize)]
 struct DHCPReq {
     action: String,
@@ -249,8 +361,27 @@ async fn api_dhcp(
     let mac = mac.replace("-", ":");
 
     let ip = payload.ip;
+    debug!("dhcp is called for {}: {},{} ", action, ip, mac);
 
-    if action == "add" {
+    if action == "del" {
+        // remove dhcp record
+        if let Err(e) = entity::client::Entity::delete_many()
+            .filter(entity::client::Column::MacAddr.eq(&mac))
+            .exec(&state.db)
+            .await
+        {
+            error!("DB Error: {}", e);
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        } else {
+            debug!("dhcp record is deleted successfully");
+            // If there is any pending timer, abort and remove it
+            let mut pending = state.pending_authorizations.lock().await;
+            if let Some(handle) = pending.remove(&mac) {
+                debug!("Aborting pending timer due to DHCP delete for {}", mac);
+                handle.abort();
+            }
+        }
+    } else {
         // add dhcp record
         let client = entity::client::Entity::find()
             .filter(entity::client::Column::MacAddr.eq(mac.clone()))
@@ -263,9 +394,10 @@ async fn api_dhcp(
 
         let possible_client = client.unwrap();
         if possible_client.is_none() {
+            debug!("The client is new");
             let client_active = entity::client::ActiveModel {
-                mac_addr: Set(Some(mac)),
-                ip_addr: Set(Some(ip)),
+                mac_addr: Set(Some(mac.clone())),
+                ip_addr: Set(Some(ip.clone())),
                 auth: Set(false),
                 ..Default::default()
             };
@@ -273,30 +405,25 @@ async fn api_dhcp(
                 error!("DB Error: {}", e);
                 return StatusCode::INTERNAL_SERVER_ERROR;
             }
+            start_authorization_timer(state.clone(), mac.clone(), ip.clone()).await;
         } else {
             let mut client_active: entity::client::ActiveModel = possible_client.unwrap().into();
-            client_active.ip_addr = Set(Some(ip));
+
+            let client_auth: bool = client_active.auth.clone().take().unwrap();
+            debug!("The client is not new: {}", client_auth);
+            if client_auth == true {
+                let result =
+                    execute_shell_script("./white_list.sh", vec![], Duration::from_secs(10))
+                        .await?;
+                debug!("{:?}", result);
+            }
+            client_active.ip_addr = Set(Some(ip.clone()));
             if let Err(e) = client_active.update(&state.db).await {
                 error!("DB Error: {}", e);
                 return StatusCode::INTERNAL_SERVER_ERROR;
             }
         }
-    } else if action == "del" {
-        // remove dhcp record
-        if let Err(e) = entity::client::Entity::delete_many()
-            .filter(entity::client::Column::MacAddr.eq(mac))
-            .exec(&state.db)
-            .await
-        {
-            error!("DB Error: {}", e);
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        } else {
-            debug!("dhcp record is deleted successfully");
-        }
-    } else {
-        debug!("unsupported action: {action}");
     }
-
     StatusCode::OK
 }
 
