@@ -32,6 +32,7 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 
+use crate::entity::client;
 use crate::errors::RustiveError;
 use crate::utils::execute_shell_script;
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +146,7 @@ async fn main() -> Result<(), RustiveError> {
         .route("/", get(show_portal))
         .route("/{*full_path}", get(show_portal))
         .route("/authorize", post(api_authorize))
+        .route("/dhcp", post(api_dhcp))
         .with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr)
@@ -231,10 +233,78 @@ async fn api_authorize(
     )
 }
 
+#[derive(Deserialize)]
+struct DHCPReq {
+    action: String,
+    ip: String,
+    mac: String,
+}
+
+async fn api_dhcp(
+    state: State<AppState>,
+    axum::Json(payload): axum::Json<DHCPReq>,
+) -> impl IntoResponse {
+    let action = payload.action;
+    let mac = payload.mac.to_lowercase();
+    let mac = mac.replace("-", ":");
+
+    let ip = payload.ip;
+
+    if action == "add" {
+        // add dhcp record
+        let client = entity::client::Entity::find()
+            .filter(entity::client::Column::MacAddr.eq(mac.clone()))
+            .one(&state.db)
+            .await;
+        if let Err(e) = client {
+            error!("DB Error: {}", e);
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+
+        let possible_client = client.unwrap();
+        if possible_client.is_none() {
+            let client_active = entity::client::ActiveModel {
+                mac_addr: Set(Some(mac)),
+                ip_addr: Set(Some(ip)),
+                auth: Set(false),
+                ..Default::default()
+            };
+            if let Err(e) = client_active.save(&state.db).await {
+                error!("DB Error: {}", e);
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+        } else {
+            let mut client_active: entity::client::ActiveModel = possible_client.unwrap().into();
+            client_active.ip_addr = Set(Some(ip));
+            if let Err(e) = client_active.update(&state.db).await {
+                error!("DB Error: {}", e);
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+        }
+    } else if action == "del" {
+        // remove dhcp record
+        if let Err(e) = entity::client::Entity::delete_many()
+            .filter(entity::client::Column::MacAddr.eq(mac))
+            .exec(&state.db)
+            .await
+        {
+            error!("DB Error: {}", e);
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        } else {
+            debug!("dhcp record is deleted successfully");
+        }
+    } else {
+        debug!("unsupported action: {action}");
+    }
+
+    StatusCode::OK
+}
+
 async fn show_portal(
     _state: State<AppState>,
     full_path: Option<Path<String>>,
 ) -> impl IntoResponse {
     debug!("full path is {full_path:?}");
+
     (StatusCode::FOUND, [("Location", "https://podbox.plus")])
 }
