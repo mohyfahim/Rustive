@@ -5,16 +5,16 @@ meta {
 }
 
 post {
-  url: http://localhost:8090/dhcp
+  url: http://192.168.2.127:8090/dhcp
   body: json
   auth: inherit
 }
 
 body:json {
   {
-    "mac": "11:22:33:44:55:77",
-    "ip": "192.168.2.1",
-    "action": "add"
+    "mac": "b6:62:6c:f1:c5:c5",
+    "ip": "192.168.2.175",
+    "action": "old"
   }
 }
 

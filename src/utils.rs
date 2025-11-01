@@ -1,3 +1,4 @@
+use log::debug;
 use std::io::{self, ErrorKind};
 use std::process::{Output, Stdio};
 use tokio::io::AsyncReadExt;
@@ -27,7 +28,7 @@ pub async fn execute_shell_script(
     timeout_duration: Duration,
 ) -> Result<Output, RustiveError> {
     let mut cmd = Command::new(script_path);
-    cmd.args(args);
+    cmd.args(args.clone());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -48,11 +49,16 @@ pub async fn execute_shell_script(
         buf
     });
 
+    debug!("run: {} {:?}", script_path, args);
+
     let status = select! {
         res = child.wait() => {
             match res {
-                Ok(status) => status,
+                Ok(status) => {
+                    debug!("runsss: {} {:?}", script_path, args);
+                    status},
                 Err(e) => {
+                    debug!("runeee: {} {:?}", script_path, args);
                     let _ = read_stdout.await;
                     let _ = read_stderr.await;
                     return Err(RustiveError::CommandExecutionFailed(script_path.to_string()));
@@ -60,6 +66,7 @@ pub async fn execute_shell_script(
             }
         }
         _ =time::sleep(timeout_duration) => {
+            debug!("Timeout is occurred");
             let _ = child.kill().await;
             // Wait for the process to exit after kill
             let _ = child.wait().await;
@@ -69,6 +76,8 @@ pub async fn execute_shell_script(
             return Err(RustiveError::Timeout);
         }
     };
+
+    debug!("run end");
 
     let stdout_buf = read_stdout
         .await

@@ -29,7 +29,7 @@ if [ "$(id -u)" -ne 0 ]; then
   die "run as root"
 fi
 
-if ! iptables -t nat -L "${CAPTIVE_CHAIN}" >/dev/null 2>&1; then
+if ! iptables -n -t nat -L "${CAPTIVE_CHAIN}" >/dev/null 2>&1; then
   die "nat chain ${CAPTIVE_CHAIN} not found. Ensure captive script created it."
 fi
 
@@ -99,8 +99,8 @@ case "${op}" in
       else
         echo "No MAC whitelist nat rule found for ${mac}"
       fi
-      iptables -C FORWARD -m mac --mac-source "${mac}" -j ACCEPT >/dev/null 2>&1 && \
-        iptables -D FORWARD -m mac --mac-source "${mac}" -j ACCEPT && echo "Removed FORWARD accept for MAC ${mac}"
+      iptables  -C FORWARD -m mac --mac-source "${mac}" -j ACCEPT >/dev/null 2>&1 && \
+        iptables  -D FORWARD -m mac --mac-source "${mac}" -j ACCEPT && echo "Removed FORWARD accept for MAC ${mac}"
     fi
 
     if [ -n "$ip" ]; then

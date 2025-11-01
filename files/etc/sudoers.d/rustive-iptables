@@ -1,0 +1,2 @@
+orangepi ALL=(ALL) NOPASSWD: /home/orangepi/capture.sh
+orangepi ALL=(ALL) NOPASSWD: /home/orangepi/white_list.sh *
