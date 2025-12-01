@@ -1,0 +1,12 @@
+#!/bin/bash
+set -e
+
+# stop service before removing files
+if systemctl is-active --quiet rustive.service; then
+    systemctl stop rustive.service || true
+fi
+
+# disable service
+systemctl disable rustive.service || true
+
+exit 0

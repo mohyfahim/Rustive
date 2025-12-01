@@ -8,9 +8,32 @@ anyhow = "1.0.100"
 axum = { version = "0.8.6", features = ["tokio"] }
 env_logger = "0.11.8"
 log = "0.4.28"
+rand = "0.9.2"
 sea-orm = { version = "1.1.17", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
 sea-orm-migration = { version = "1.1.17", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["full"] }
+tower-http = { version = "0.6.7", features = ["cors"] }
+
+[profile.release]
+opt-level = 'z'     # Optimize for size
+lto = true          # Enable link-time optimization
+codegen-units = 1   # Reduce number of codegen units to increase optimizations
+panic = 'abort'     # Abort on panic
+strip = true        # Strip symbols from binary*
+
+
+[package.metadata.deb]
+name = "rustive"
+maintainer = "Mohy Fahim <fahimohy@gmail.com>"
+depends = ["$auto", "monir"]
+maintainer-scripts = "packaging"
+assets = [
+  ["target/release/rustive", "usr/bin/rustive", "0755"],
+  ["packaging/capture.sh", "usr/bin/capture.sh", "0755"],
+  ["packaging/white_list.sh", "usr/bin/white_list.sh", "0755"],
+  ["packaging/rustive.service", "lib/systemd/system/rustive.service", "0644"],
+  ["files/etc/sudoers.d/rustive-iptables", "etc/sudoers.d/rustive-iptables", "0644"]
+]

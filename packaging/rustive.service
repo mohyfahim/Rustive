@@ -1,0 +1,15 @@
+[Unit]
+Description=Captive Portal service
+After=network.target
+
+[Service]
+Type=simple
+Environment="RUST_LOG=debug"
+User=podbox
+Group=podbox
+ExecStart=/usr/bin/rustive 
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

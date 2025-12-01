@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+# # create system user (if not exists) and data dir
+# if ! id -u rustive >/dev/null 2>&1; then
+#     adduser --system --no-create-home --group --quiet rustive
+# fi
+
+# create var dir and set ownership
+rm -rf /var/lib/rustive
+mkdir -p /var/lib/rustive
+chown -R podbox:podbox /var/lib/rustive
+
+# reload systemd and enable+start service
+systemctl daemon-reload
+systemctl enable rustive.service || true
+systemctl restart rustive.service || systemctl start rustive.service || true
+
+exit 0

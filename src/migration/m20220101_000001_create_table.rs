@@ -15,7 +15,7 @@ impl MigrationTrait for Migration {
                     .col(string_null(Client::IPAddr).default(""))
                     .col(string_null(Client::MACAddr).default(""))
                     .col(boolean(Client::Auth).default(false))
-                    .col(boolean(Client::WatchPortal).default(false))
+                    .col(string(Client::Token).default(""))
                     .to_owned(),
             )
             .await
@@ -35,5 +35,5 @@ enum Client {
     IPAddr,
     MACAddr,
     Auth,
-    WatchPortal,
+    Token,
 }

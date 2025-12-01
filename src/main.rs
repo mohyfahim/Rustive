@@ -5,6 +5,7 @@ mod utils;
 
 use axum::Extension;
 use axum::Router;
+use axum::extract::ConnectInfo;
 use axum::extract::Path;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -14,28 +15,34 @@ use axum::routing::get;
 use axum::routing::post;
 use log::warn;
 use log::{debug, error, info};
+use rand::Rng;
+use rand::distr::Alphanumeric;
 use sea_orm::ActiveModelTrait;
 use sea_orm::ActiveValue::Set;
 use sea_orm::ColumnTrait;
 use sea_orm::DbConn;
 use sea_orm::EntityTrait;
 use sea_orm::QueryFilter;
+use sea_orm::QueryOrder;
 use sea_orm::SqlErr;
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
+use std::fmt::format;
+use std::io;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
-
-use std::collections::{HashMap, HashSet};
-use std::io;
-use std::sync::Arc;
-use std::time::Duration;
-
-use tokio::sync::RwLock;
+use tower_http::cors::Any;
+use tower_http::cors::CorsLayer;
 
 use crate::entity::client;
 use crate::errors::RustiveError;
@@ -62,7 +69,62 @@ impl Default for Config {
             wan_iface: "eth1".into(),
             allowed_ips: vec!["8.8.8.8".into()],
             allowed_hosts: vec!["updates.example.com".into()],
-            db_path: "sqlite://db.db?mode=rwc".into(),
+            db_path: "sqlite:///var/lib/rustive/db.db?mode=rwc".into(),
+        }
+    }
+}
+
+/// Simple LRU-ish cache for mapping IP -> token, capacity-limited.
+/// Uses insertion order with eviction of oldest when capacity exceeded.
+#[derive(Debug)]
+struct ClientCache {
+    map: HashMap<String, String>, // ip -> token
+    order: VecDeque<String>,      // queue of IPs, oldest at front
+    capacity: usize,
+}
+
+impl ClientCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    fn get(&self, ip: &str) -> Option<String> {
+        self.map.get(ip).cloned()
+    }
+
+    fn insert(&mut self, ip: String, token: String) {
+        // if already exists, move to back (most recently inserted)
+        if self.map.contains_key(&ip) {
+            // update token then move ip to back
+            self.map.insert(ip.clone(), token);
+            // remove old position from order and push_back
+            self.order.retain(|k| k != &ip);
+            self.order.push_back(ip);
+            return;
+        }
+
+        // Evict oldest if capacity reached
+        if self.map.len() >= self.capacity {
+            if let Some(old_ip) = self.order.pop_front() {
+                self.map.remove(&old_ip);
+            }
+        }
+
+        self.order.push_back(ip.clone());
+        self.map.insert(ip, token);
+    }
+
+    fn remove(&mut self, ip: &str) {
+        if self.map.remove(ip).is_some() {
+            self.order.retain(|k| k != ip);
         }
     }
 }
@@ -78,6 +140,7 @@ struct AppState {
     db: DatabaseConnection,
     pending_authorizations: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     pending_ping_timers: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<()>>>>,
+    client_cache: Arc<RwLock<ClientCache>>,
 }
 
 // async fn capture_all_traffics()  ->
@@ -173,7 +236,7 @@ async fn create_ping_timer_if_missing(state: State<AppState>, mac: String) {
                                 let result = execute_shell_script(
                                     "sudo",
                                     vec![
-                                        "/home/orangepi/white_list.sh".to_string(),
+                                        "/usr/bin/white_list.sh".to_string(),
                                         "add".to_string(),
                                         "".to_string(),
                                         mac_for_task.clone(),
@@ -254,7 +317,7 @@ async fn main() -> Result<(), RustiveError> {
     {
         let result = execute_shell_script(
             "sudo",
-            vec!["/home/orangepi/capture.sh".to_string()],
+            vec!["/usr/bin/capture.sh".to_string()],
             Duration::from_secs(10),
         )
         .await?;
@@ -275,6 +338,55 @@ async fn main() -> Result<(), RustiveError> {
         Arc::new(Mutex::new(HashMap::new()));
     let pending_ping_map: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<()>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let client_cache = Arc::new(RwLock::new(ClientCache::new(100)));
+
+    // Load clients from DB into cache (up to capacity)
+    {
+        // Attempt to load most recent clients first (assumes client::Column::Id exists)
+        match client::Entity::find()
+            .order_by_desc(client::Column::Id)
+            .all(&conn)
+            .await
+        {
+            Ok(clients) => {
+                let mut cache = client_cache.write().await;
+                for c in clients {
+                    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+                    {
+                        if c.auth == true {
+                            debug!(
+                                "giving access to {}",
+                                c.ip_addr.clone().unwrap_or("".to_string())
+                            );
+                            let mac_for_task = c.mac_addr.unwrap_or("".to_string());
+                            let result = execute_shell_script(
+                                "sudo",
+                                vec![
+                                    "/usr/bin/white_list.sh".to_string(),
+                                    "add".to_string(),
+                                    "".to_string(),
+                                    mac_for_task,
+                                ],
+                                Duration::from_secs(10),
+                            )
+                            .await;
+                        }
+                    }
+
+                    if cache.len() >= cache.capacity {
+                        break;
+                    }
+                    if let (Some(ip), token) = (c.ip_addr.clone(), c.token.clone()) {
+                        cache.insert(ip, token);
+                    }
+                }
+                debug!("Loaded {} clients into runtime cache", cache.len());
+            }
+            Err(e) => {
+                error!("Failed to preload client cache from DB: {}", e);
+            }
+        }
+    }
 
     let state = AppState {
         config: config.clone(),
@@ -284,6 +396,7 @@ async fn main() -> Result<(), RustiveError> {
         db: conn,
         pending_authorizations: pending_map.clone(),
         pending_ping_timers: pending_ping_map.clone(),
+        client_cache: client_cache.clone(),
     };
     let app = Router::new()
         .route("/", get(show_portal))
@@ -291,39 +404,85 @@ async fn main() -> Result<(), RustiveError> {
         .route("/authorize", post(api_authorize))
         .route("/dhcp", post(api_dhcp))
         .route("/ping", post(api_ping))
-        .with_state(state.clone());
+        .with_state(state.clone())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        );
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr)
         .await
         .unwrap();
     info!("Server is Running on {}", &config.listen_addr);
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(state))
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(state))
+    .await?;
 
     Ok(())
 }
 
 #[derive(Deserialize)]
 struct AuthReq {
-    mac: String,
+    token: String,
 }
 
 async fn api_authorize(
     state: State<AppState>,
     axum::Json(payload): axum::Json<AuthReq>,
 ) -> impl IntoResponse {
-    info!("{:?}", state);
-    info!("{:p}", &state.config);
-    info!("{:p}", &state.db);
-    info!("{:p}", state.authorized_macs);
+    let token = payload.token;
+    let mut mac = String::new();
+    let mut mac_for_task = String::new();
+    {
+        // let mut s = state.allowed_ips.write().await;
+        let client = entity::client::Entity::find()
+            .filter(entity::client::Column::Token.eq(token.clone()))
+            .one(&state.db)
+            .await;
+        if let Err(e) = client {
+            error!("DB Error: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(
+                    serde_json::json!({"status":false, "redirect": null, "message": e.to_string()}),
+                ),
+            );
+        }
+        let possible_client = client.unwrap();
+        if possible_client.is_none() {
+            error!("DB Error: client is None");
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(
+                    serde_json::json!({"status": false, "redirect": null, "message":"Client doesn't exist"}),
+                ),
+            );
+        } else {
+            mac = possible_client.clone().unwrap().mac_addr.unwrap();
+            mac_for_task = mac.clone();
+            let mut client_active: entity::client::ActiveModel = possible_client.unwrap().into();
+            client_active.auth = Set(true);
+            if let Err(e) = client_active.update(&state.db).await {
+                error!("DB Error: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(
+                        serde_json::json!({"status": false, "redirect": null, "message": e.to_string()}),
+                    ),
+                );
+            }
+        }
+    }
 
-    let mac = payload.mac.to_lowercase();
     // basic normalization
-    let mac = mac.replace("-", ":");
+    // let mac = mac.replace("-", ":");
 
-    let mac_for_task = mac.clone();
     // cancel any pending timer for this mac
     {
         let mut pending = state.pending_authorizations.lock().await;
@@ -341,49 +500,13 @@ async fn api_authorize(
         }
     }
 
-    {
-        let mut s = state.authorized_macs.write().await;
-        if s.insert(mac.clone()) {
-            let client = entity::client::Entity::find()
-                .filter(entity::client::Column::MacAddr.eq(mac.clone()))
-                .one(&state.db)
-                .await;
-            if let Err(e) = client {
-                error!("DB Error: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(serde_json::json!({"status":"false","mac":mac})),
-                );
-            }
-            let possible_client = client.unwrap();
-            if possible_client.is_none() {
-                error!("DB Error: client is None");
-                return (
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(serde_json::json!({"message":"Client doesn't exist"})),
-                );
-            } else {
-                let mut client_active: entity::client::ActiveModel =
-                    possible_client.unwrap().into();
-                client_active.auth = Set(true);
-                if let Err(e) = client_active.update(&state.db).await {
-                    error!("DB Error: {}", e);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        axum::Json(serde_json::json!({"status":"false","mac":mac})),
-                    );
-                }
-            }
-        }
-    }
-
     #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
     {
         debug!("start giving access");
         let result = execute_shell_script(
             "sudo",
             vec![
-                "/home/orangepi/white_list.sh".to_string(),
+                "/usr/bin/white_list.sh".to_string(),
                 "add".to_string(),
                 "".to_string(),
                 mac_for_task,
@@ -396,7 +519,9 @@ async fn api_authorize(
 
     (
         StatusCode::OK,
-        axum::Json(serde_json::json!({"result": {"mac": mac}})),
+        axum::Json(
+            serde_json::json!({"status": true, "redirect": "https://podbox.plus/check-internet-access", "message": null}),
+        ),
     )
 }
 
@@ -456,7 +581,7 @@ async fn start_authorization_timer(state: State<AppState>, mac: String, ip: Stri
                         let result = execute_shell_script(
                             "sudo",
                             vec![
-                                "/home/orangepi/white_list.sh".to_string(),
+                                "/usr/bin/white_list.sh".to_string(),
                                 "add".to_string(),
                                 ip_for_task,
                                 mac_for_task.clone(),
@@ -508,6 +633,14 @@ async fn start_authorization_timer(state: State<AppState>, mac: String, ip: Stri
     }
 }
 
+fn generate_random_token(length: usize) -> String {
+    rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(length)
+        .map(char::from)
+        .collect()
+}
+
 #[derive(Deserialize)]
 struct DHCPReq {
     action: String,
@@ -531,6 +664,26 @@ async fn api_dhcp(
     debug!("dhcp is called for {}: {},{} ", action, ip, mac);
 
     if action == "del" {
+        // fetch client to retrieve IP for cache removal
+        match entity::client::Entity::find()
+            .filter(entity::client::Column::MacAddr.eq(&mac))
+            .one(&state.db)
+            .await
+        {
+            Ok(Some(found)) => {
+                if let Some(ip_old) = found.ip_addr {
+                    let mut cache = state.client_cache.write().await;
+                    cache.remove(&ip_old);
+                }
+            }
+            Ok(None) => {
+                debug!("No DB client found for DHCP del (mac: {})", mac);
+            }
+            Err(e) => {
+                error!("DB Error when fetching before delete: {}", e);
+            }
+        }
+
         // remove dhcp record
         if let Err(e) = entity::client::Entity::delete_many()
             .filter(entity::client::Column::MacAddr.eq(&mac))
@@ -567,17 +720,46 @@ async fn api_dhcp(
         let possible_client = client.unwrap();
         if possible_client.is_none() {
             debug!("The client is new");
+
+            let ip_check = entity::client::Entity::find()
+                .filter(entity::client::Column::IpAddr.eq(ip.clone()))
+                .one(&state.db)
+                .await;
+            if let Err(e) = ip_check {
+                error!("DB Error: {}", e);
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+
+            if let Some(possible_ip) = ip_check.unwrap() {
+                debug!("found duplicate ip {}", possible_ip.ip_addr.unwrap());
+                let delete_ip = entity::client::Entity::delete_by_id(possible_ip.id)
+                    .exec(&state.db)
+                    .await;
+                if let Err(e) = delete_ip {
+                    error!("DB Error: {}", e);
+                    return StatusCode::INTERNAL_SERVER_ERROR;
+                }
+            }
+
+            let token = generate_random_token(32);
+            debug!("token is {token}");
             let client_active = entity::client::ActiveModel {
                 mac_addr: Set(Some(mac.clone())),
                 ip_addr: Set(Some(ip.clone())),
                 auth: Set(false),
+                token: Set(token.clone()),
                 ..Default::default()
             };
             if let Err(e) = client_active.save(&state.db).await {
                 error!("DB Error: {}", e);
                 return StatusCode::INTERNAL_SERVER_ERROR;
             }
-            start_authorization_timer(state.clone(), mac.clone(), ip.clone()).await;
+            // Insert into runtime cache
+            {
+                let mut cache = state.client_cache.write().await;
+                cache.insert(ip.clone(), token);
+            }
+            // start_authorization_timer(state.clone(), mac.clone(), ip.clone()).await;
         } else {
             let mut client_active: entity::client::ActiveModel = possible_client.unwrap().into();
 
@@ -590,7 +772,7 @@ async fn api_dhcp(
                     let result = execute_shell_script(
                         "sudo",
                         vec![
-                            "/home/orangepi/white_list.sh".to_string(),
+                            "/usr/bin/white_list.sh".to_string(),
                             "add".to_string(),
                             ip_for_task,
                             mac_for_task,
@@ -604,10 +786,39 @@ async fn api_dhcp(
                 }
             }
             debug!("here3 to run script");
+            let prev_ip_opt = client_active.ip_addr.clone().take().unwrap_or(None);
+
             client_active.ip_addr = Set(Some(ip.clone()));
             if let Err(e) = client_active.update(&state.db).await {
                 error!("DB Error: {}", e);
                 return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+            // update runtime cache: remove old ip mapping (if different), insert new mapping
+            // need token for this client: fetch token from DB quickly
+            match entity::client::Entity::find()
+                .filter(entity::client::Column::MacAddr.eq(mac.clone()))
+                .one(&state.db)
+                .await
+            {
+                Ok(Some(updated)) => {
+                    if let Some(prev_ip) = prev_ip_opt {
+                        if prev_ip != updated.ip_addr.clone().unwrap_or_default() {
+                            let mut cache = state.client_cache.write().await;
+                            cache.remove(&prev_ip);
+                        }
+                    }
+                    if let (Some(ip_new), token) = (updated.ip_addr.clone(), updated.token.clone())
+                    {
+                        let mut cache = state.client_cache.write().await;
+                        cache.insert(ip_new, token);
+                    }
+                }
+                Ok(None) => {
+                    debug!("Client not found after update when attempting to refresh cache");
+                }
+                Err(e) => {
+                    error!("DB Error when refreshing cache after update: {}", e);
+                }
             }
         }
     }
@@ -664,10 +875,38 @@ async fn api_ping(
 }
 
 async fn show_portal(
-    _state: State<AppState>,
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    state: State<AppState>,
     full_path: Option<Path<String>>,
 ) -> impl IntoResponse {
-    debug!("full path is {full_path:?}");
+    let ip_str = remote_addr.ip().to_string();
+    let mut token = String::new();
 
-    (StatusCode::FOUND, [("Location", "https://podbox.plus")])
+    // Try runtime cache first
+    {
+        let cache = state.client_cache.read().await;
+        if let Some(t) = cache.get(&ip_str) {
+            token = t;
+        }
+    }
+    if token.is_empty() {
+        let possible_client = entity::client::Entity::find()
+            .filter(entity::client::Column::IpAddr.eq(remote_addr.ip().clone().to_string()))
+            .one(&state.db)
+            .await;
+        match possible_client {
+            Ok(Some(client)) => {
+                token = client.token;
+            }
+            _ => {}
+        }
+    }
+    debug!("full path is {full_path:?}, {remote_addr}, {token}");
+    (
+        StatusCode::FOUND,
+        [(
+            "Location",
+            format!("https://podbox.plus/user-guide?token={}", token),
+        )],
+    )
 }

@@ -1,0 +1,32 @@
+#!/bin/sh
+## NOTE:
+## we depend on monir package, so the dhcp-script should be configured already.
+
+set -e
+# # file to modify
+# FILE="/etc/NetworkManager/dnsmasq-shared.d/podbox.conf"
+# DIR="$(dirname "$FILE")"
+# DESIRED_LINE="dhcp-script=/var/lib/monir/dhcp-script.sh"
+
+# # if file exists: backup and replace any existing dhcp-script lines (commented or not)
+# if [ -f "$FILE" ]; then
+#     # make a timestamped backup (best-effort)
+#     # BACKUP="${FILE}.dpkg-preinst.bak.$(date +%s)"
+#     # cp -a -- "$FILE" "$BACKUP" || true
+
+#     # remove any lines containing dhcp-script= (handles commented lines too)
+#     # then append desired line (this ensures a single canonical line)
+#     # Use a temp file to be safer with concurrent readers
+#     TMP="$(mktemp /tmp/podbox.conf.XXXXXX)" || exit 1
+#     # copy contents without dhcp-script lines
+#     grep -v -E '^[[:space:]]*#?[[:space:]]*dhcp-script=' "$FILE" > "$TMP" || true
+#     printf '%s\n' "$DESIRED_LINE" >> "$TMP"
+#     # atomically replace
+#     mv "$TMP" "$FILE"
+#     chmod 644 "$FILE"
+# else
+# 	echo "Error, podbox.conf does not exist in dnsmasq config"
+# 	exit -1
+# fi
+
+exit 0

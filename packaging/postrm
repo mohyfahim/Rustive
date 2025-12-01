@@ -1,0 +1,11 @@
+#!/bin/bash
+set -e
+
+systemctl daemon-reload || true
+
+# Optionally remove system user if you want
+# if id -u monir >/dev/null 2>&1; then
+#     userdel monir || true
+# fi
+
+exit 0
