@@ -359,17 +359,20 @@ async fn main() -> Result<(), RustiveError> {
                                 c.ip_addr.clone().unwrap_or("".to_string())
                             );
                             let mac_for_task = c.mac_addr.unwrap_or("".to_string());
+                            let ip_for_task = c.ip_addr.clone().unwrap_or("".to_string());
                             let result = execute_shell_script(
                                 "sudo",
                                 vec![
                                     "/usr/bin/white_list.sh".to_string(),
                                     "add".to_string(),
-                                    "".to_string(),
+                                    ip_for_task,
                                     mac_for_task,
                                 ],
                                 Duration::from_secs(10),
                             )
                             .await;
+                        } else {
+                            debug!("not giving access to {:?}", c);
                         }
                     }
 
@@ -439,6 +442,7 @@ async fn api_authorize(
     let token = payload.token;
     let mut mac = String::new();
     let mut mac_for_task = String::new();
+    let mut ip_for_task = String::new();
     {
         // let mut s = state.allowed_ips.write().await;
         let client = entity::client::Entity::find()
@@ -466,6 +470,7 @@ async fn api_authorize(
         } else {
             mac = possible_client.clone().unwrap().mac_addr.unwrap();
             mac_for_task = mac.clone();
+            ip_for_task = possible_client.clone().unwrap().ip_addr.unwrap();
             let mut client_active: entity::client::ActiveModel = possible_client.unwrap().into();
             client_active.auth = Set(true);
             if let Err(e) = client_active.update(&state.db).await {
@@ -508,7 +513,7 @@ async fn api_authorize(
             vec![
                 "/usr/bin/white_list.sh".to_string(),
                 "add".to_string(),
-                "".to_string(),
+                ip_for_task,
                 mac_for_task,
             ],
             Duration::from_secs(10),
@@ -704,6 +709,22 @@ async fn api_dhcp(
             let mut pending_ping = state.pending_ping_timers.lock().await;
             if pending_ping.remove(&mac).is_some() {
                 debug!("Removed pending ping timer due to DHCP delete for {}", mac);
+            }
+            #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+            {
+                debug!("start deleting access");
+                let result = execute_shell_script(
+                    "sudo",
+                    vec![
+                        "/usr/bin/white_list.sh".to_string(),
+                        "del".to_string(),
+                        ip_for_task,
+                        mac_for_task,
+                    ],
+                    Duration::from_secs(10),
+                )
+                .await;
+                debug!("{:?}", result);
             }
         }
     } else {

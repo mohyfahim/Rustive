@@ -7,7 +7,6 @@ set -e
 # fi
 
 # create var dir and set ownership
-rm -rf /var/lib/rustive
 mkdir -p /var/lib/rustive
 chown -R podbox:podbox /var/lib/rustive
 

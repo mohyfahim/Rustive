@@ -37,6 +37,18 @@ op="$1"
 ip="$2"
 mac="$3"
 
+NM_RULE_NAME="nm-sh-fw-br0"
+nm_line=$(iptables -L FORWARD --line-numbers -n | awk -v name="$NM_RULE_NAME" '$0 ~ name { print $1; exit }' || true)
+
+if [ -z "$nm_line" ]; then
+  echo "Warning: rule '$NM_RULE_NAME' not found in $CHAIN. Inserting ACCEPT rules at top of chain."
+  insert_pos=1
+else
+  # insert position should be immediately after nm-sh-fw-br0
+  insert_pos=$((nm_line + 1))
+  echo "Found $NM_RULE_NAME at line $nm_line, will insert at position $insert_pos"
+fi
+
 case "${op}" in
   add)
     [ -z "$ip" ] && [ -z "$mac" ] && die "provide at least IP or MAC to add"
@@ -56,7 +68,7 @@ case "${op}" in
       if iptables -C FORWARD -m mac --mac-source "${mac}" -j ACCEPT >/dev/null 2>&1; then
         echo "FORWARD accept already present for MAC ${mac}"
       else
-        iptables -I FORWARD 1 -m mac --mac-source "${mac}" -j ACCEPT \
+        iptables -I FORWARD $insert_pos -m mac --mac-source "${mac}" -j ACCEPT \
           || die "failed to add FORWARD accept for MAC"
         echo "Added FORWARD accept for MAC ${mac}"
       fi
@@ -75,13 +87,13 @@ case "${op}" in
       if iptables -C FORWARD -s "${ip}" -j ACCEPT >/dev/null 2>&1; then
         echo "FORWARD accept already present for source IP ${ip}"
       else
-        iptables -I FORWARD 1 -s "${ip}" -j ACCEPT || die "failed to add FORWARD accept (src)"
+        iptables -I FORWARD $insert_pos -s "${ip}" -j ACCEPT || die "failed to add FORWARD accept (src)"
         echo "Added FORWARD accept for source IP ${ip}"
       fi
       if iptables -C FORWARD -d "${ip}" -j ACCEPT >/dev/null 2>&1; then
         echo "FORWARD accept already present for dest IP ${ip}"
       else
-        iptables -I FORWARD 1 -d "${ip}" -j ACCEPT || die "failed to add FORWARD accept (dst)"
+        iptables -I FORWARD $insert_pos -d "${ip}" -j ACCEPT || die "failed to add FORWARD accept (dst)"
         echo "Added FORWARD accept for dest IP ${ip}"
       fi
     fi
