@@ -471,7 +471,18 @@ async fn api_authorize(state: State<AppState>, headers: HeaderMap) -> impl IntoR
                 ),
             );
         } else {
-            mac = possible_client.clone().unwrap().mac_addr.unwrap();
+            let client = possible_client.clone().unwrap();
+            let auth = client.auth;
+
+            if auth {
+                return (
+                    StatusCode::OK,
+                    axum::Json(
+                        serde_json::json!({"status": true, "redirect": "https://podbox.plus/captive-portal/check-internet-access", "message": null}),
+                    ),
+                );
+            }
+            mac = client.mac_addr.unwrap();
             mac_for_task = mac.clone();
             ip_for_task = possible_client.clone().unwrap().ip_addr.unwrap();
             let mut client_active: entity::client::ActiveModel = possible_client.unwrap().into();
@@ -950,7 +961,7 @@ async fn api_captive(
             format!(
                 "{{\"captive\": false, \"user-portal-url\": \
                 \"https://podbox.plus/captive-portal/user-guide?token={}\", \"venue-info-url\":\"https://podbox.plus/\",\
-                 \"seconds-remaining\": 326, \"can-extend-session\": true}}",
+                 \"seconds-remaining\": 3600, \"can-extend-session\": true}}",
                 token
             ),
         )
@@ -1005,13 +1016,21 @@ async fn show_portal(
     }
     debug!("full path is {full_path:?}, {ip_str}, {token}");
     (
-        StatusCode::FOUND,
-        [(
-            "Location",
-            format!(
-                "https://podbox.plus/captive-portal/user-guide?token={}",
-                token
+        StatusCode::OK,
+        [
+            (
+                "Location",
+                format!(
+                    "https://podbox.plus/captive-portal/user-guide?token={}",
+                    token
+                ),
             ),
-        )],
+            ("Content-Type", "application/captive+json".to_string()),
+            ("Cache-Control", "private".to_string()),
+        ],
+        format!(
+            "{{\"captive\": true, \"user-portal-url\": \"https://podbox.plus/captive-portal/user-guide?token={}\", \"venue-info-url\":\"https://podbox.plus/\"}}",
+            token
+        ),
     )
 }
