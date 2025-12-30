@@ -5,10 +5,15 @@ mod utils;
 
 use axum::Extension;
 use axum::Router;
+use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::extract::Path;
 use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::http::HeaderValue;
+use axum::http::Response;
 use axum::http::StatusCode;
+use axum::http::header;
 use axum::response::IntoResponse;
 use axum::response::Redirect;
 use axum::routing::get;
@@ -19,6 +24,7 @@ use rand::Rng;
 use rand::distr::Alphanumeric;
 use sea_orm::ActiveModelTrait;
 use sea_orm::ActiveValue::Set;
+use sea_orm::ColIdx;
 use sea_orm::ColumnTrait;
 use sea_orm::DbConn;
 use sea_orm::EntityTrait;
@@ -401,8 +407,10 @@ async fn main() -> Result<(), RustiveError> {
         pending_ping_timers: pending_ping_map.clone(),
         client_cache: client_cache.clone(),
     };
+
     let app = Router::new()
         .route("/", get(show_portal))
+        .route("/captive", get(api_captive))
         .route("/{*full_path}", get(show_portal))
         .route("/authorize", post(api_authorize))
         .route("/dhcp", post(api_dhcp))
@@ -430,23 +438,18 @@ async fn main() -> Result<(), RustiveError> {
     Ok(())
 }
 
-#[derive(Deserialize)]
-struct AuthReq {
-    token: String,
-}
-
-async fn api_authorize(
-    state: State<AppState>,
-    axum::Json(payload): axum::Json<AuthReq>,
-) -> impl IntoResponse {
-    let token = payload.token;
+async fn api_authorize(state: State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let mut mac = String::new();
     let mut mac_for_task = String::new();
     let mut ip_for_task = String::new();
+    let default_header_value = HeaderValue::from_static("127.0.0.1");
+    let possible_remote_addr = headers.get("x-real-ip").unwrap_or(&default_header_value);
+    let remote_addr = possible_remote_addr.to_str().unwrap_or("127.0.0.1");
+    debug!("Client request with this ip: {}", remote_addr);
     {
         // let mut s = state.allowed_ips.write().await;
         let client = entity::client::Entity::find()
-            .filter(entity::client::Column::Token.eq(token.clone()))
+            .filter(entity::client::Column::IpAddr.eq(remote_addr))
             .one(&state.db)
             .await;
         if let Err(e) = client {
@@ -525,7 +528,7 @@ async fn api_authorize(
     (
         StatusCode::OK,
         axum::Json(
-            serde_json::json!({"status": true, "redirect": "https://podbox.plus/check-internet-access", "message": null}),
+            serde_json::json!({"status": true, "redirect": "https://podbox.plus/captive-portal/check-internet-access", "message": null}),
         ),
     )
 }
@@ -895,13 +898,91 @@ async fn api_ping(
     StatusCode::OK
 }
 
+async fn api_captive(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    state: State<AppState>,
+) -> impl IntoResponse {
+    let mut token = String::new();
+    let mut auth: bool = false;
+    let remote_add_str = remote_addr.ip().to_string();
+    let possible_default_header_value = HeaderValue::from_str(remote_add_str.as_str());
+
+    let default_header_value = match possible_default_header_value {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Failed to create default header value: {}", e);
+            HeaderValue::from_static("127.0.0.1")
+        }
+    };
+
+    let possible_ip_str = headers.get("x-real-ip").unwrap_or(&default_header_value);
+    let ip_str = possible_ip_str.to_str().unwrap_or("127.0.0.1");
+
+    let possible_client = entity::client::Entity::find()
+        .filter(entity::client::Column::IpAddr.eq(ip_str.to_string()))
+        .one(&state.db)
+        .await;
+
+    match possible_client {
+        Ok(Some(client)) => {
+            token = client.token;
+            auth = client.auth;
+        }
+        _ => {}
+    }
+
+    debug!("captive api: {ip_str}, {token}, {auth}");
+    if auth {
+        (
+            StatusCode::OK,
+            [
+                (
+                    "Location",
+                    format!(
+                        "https://podbox.plus/captive-portal/user-guide?token={}",
+                        token
+                    ),
+                ),
+                ("Content-Type", "application/captive+json".to_string()),
+                ("Cache-Control", "private".to_string()),
+            ],
+            format!(
+                "{{\"captive\": false, \"user-portal-url\": \
+                \"https://podbox.plus/captive-portal/user-guide?token={}\", \"venue-info-url\":\"https://podbox.plus/\",\
+                 \"seconds-remaining\": 326, \"can-extend-session\": true}}",
+                token
+            ),
+        )
+    } else {
+        (
+            StatusCode::OK,
+            [
+                (
+                    "Location",
+                    format!(
+                        "https://podbox.plus/captive-portal/user-guide?token={}",
+                        token
+                    ),
+                ),
+                ("Content-Type", "application/captive+json".to_string()),
+                ("Cache-Control", "private".to_string()),
+            ],
+            format!(
+                "{{\"captive\": true, \"user-portal-url\": \"https://podbox.plus/captive-portal/user-guide?token={}\", \"venue-info-url\":\"https://podbox.plus/\"}}",
+                token
+            ),
+        )
+    }
+}
+
 async fn show_portal(
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     state: State<AppState>,
     full_path: Option<Path<String>>,
 ) -> impl IntoResponse {
-    let ip_str = remote_addr.ip().to_string();
     let mut token = String::new();
+    let ip_str = remote_addr.ip().to_string();
 
     // Try runtime cache first
     {
@@ -922,12 +1003,15 @@ async fn show_portal(
             _ => {}
         }
     }
-    debug!("full path is {full_path:?}, {remote_addr}, {token}");
+    debug!("full path is {full_path:?}, {ip_str}, {token}");
     (
         StatusCode::FOUND,
         [(
             "Location",
-            format!("https://podbox.plus/user-guide?token={}", token),
+            format!(
+                "https://podbox.plus/captive-portal/user-guide?token={}",
+                token
+            ),
         )],
     )
 }
