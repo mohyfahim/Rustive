@@ -499,25 +499,25 @@ async fn api_authorize(state: State<AppState>, headers: HeaderMap) -> impl IntoR
         }
     }
 
-    // basic normalization
-    // let mac = mac.replace("-", ":");
+    // // basic normalization
+    // // let mac = mac.replace("-", ":");
 
-    // cancel any pending timer for this mac
-    {
-        let mut pending = state.pending_authorizations.lock().await;
-        if let Some(handle) = pending.remove(&mac) {
-            debug!("Canceling pending authorization timer for {}", mac);
-            handle.abort();
-        }
-    }
+    // // cancel any pending timer for this mac
+    // {
+    //     let mut pending = state.pending_authorizations.lock().await;
+    //     if let Some(handle) = pending.remove(&mac) {
+    //         debug!("Canceling pending authorization timer for {}", mac);
+    //         handle.abort();
+    //     }
+    // }
 
-    // cancel any pending ping timer (drop sender -> receiver sees None and quits)
-    {
-        let mut pending_ping = state.pending_ping_timers.lock().await;
-        if pending_ping.remove(&mac).is_some() {
-            debug!("Removed pending ping timer for {} due to authorize", mac);
-        }
-    }
+    // // cancel any pending ping timer (drop sender -> receiver sees None and quits)
+    // {
+    //     let mut pending_ping = state.pending_ping_timers.lock().await;
+    //     if pending_ping.remove(&mac).is_some() {
+    //         debug!("Removed pending ping timer for {} due to authorize", mac);
+    //     }
+    // }
 
     #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
     {
@@ -914,6 +914,11 @@ async fn api_captive(
     headers: HeaderMap,
     state: State<AppState>,
 ) -> impl IntoResponse {
+    // print headers
+    for (key, value) in headers.iter() {
+        debug!("Header: {} = {:?}", key, value);
+    }
+
     let mut token = String::new();
     let mut auth: bool = false;
     let remote_add_str = remote_addr.ip().to_string();
@@ -1016,7 +1021,7 @@ async fn show_portal(
     }
     debug!("full path is {full_path:?}, {ip_str}, {token}");
     (
-        StatusCode::OK,
+        StatusCode::FOUND,
         [
             (
                 "Location",
@@ -1025,12 +1030,7 @@ async fn show_portal(
                     token
                 ),
             ),
-            ("Content-Type", "application/captive+json".to_string()),
             ("Cache-Control", "private".to_string()),
         ],
-        format!(
-            "{{\"captive\": true, \"user-portal-url\": \"https://podbox.plus/captive-portal/user-guide?token={}\", \"venue-info-url\":\"https://podbox.plus/\"}}",
-            token
-        ),
     )
 }

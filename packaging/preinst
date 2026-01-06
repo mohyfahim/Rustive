@@ -1,32 +1,85 @@
 #!/bin/sh
 ## NOTE:
 ## we depend on monir package, so the dhcp-script should be configured already.
-
 set -e
+
 # file to modify
 FILE="/etc/NetworkManager/dnsmasq-shared.d/podbox.conf"
 DIR="$(dirname "$FILE")"
-DESIRED_LINE="dhcp-option=114,"https://captive.podbox.plus/captive""
 
-# if file exists: backup and replace any existing dhcp-script lines (commented or not)
+# Put each desired line on its own line below.
+# Add or remove lines as required.
+DESIRED_LINES=$(
+	cat <<'EOF'
+dhcp-option=114,"https://captive.podbox.plus/captive"
+dhcp-option=103,"https://captive.podbox.plus/captive"
+dhcp-option=37,"https://captive.podbox.plus/captive"
+dhcp-script=/var/lib/monir/dhcp-script.sh
+EOF
+)
+
+EXCLUDE_PATTERN="^[[:space:]]*#?[[:space:]]*dhcp-script="
+
+# helper: cleanup tempfile on exit
+cleanup() {
+	[ -n "${TMP:-}" ] && [ -f "$TMP" ] && rm -f "$TMP" || true
+}
+trap cleanup EXIT INT TERM
+
+# if file exists: backup and replace any existing matching dhcp-option lines
 if [ -f "$FILE" ]; then
-	# make a timestamped backup (best-effort)
+	# # make a timestamped backup (best-effort)
 	# BACKUP="${FILE}.dpkg-preinst.bak.$(date +%s)"
 	# cp -a -- "$FILE" "$BACKUP" || true
 
-	# remove any lines containing dhcp-script= (handles commented lines too)
-	# then append desired line (this ensures a single canonical line)
-	# Use a temp file to be safer with concurrent readers
 	TMP="$(mktemp /tmp/podbox.conf.XXXXXX)" || exit 1
-	# copy contents without dhcp-option=114 lines
-	grep -v -E '^[[:space:]]*#?[[:space:]]*dhcp-option=114' "$FILE" >"$TMP" || true
-	printf '%s\n' "$DESIRED_LINE" >>"$TMP"
-	# atomically replace
+	TMP_DESIRED="$(mktemp /tmp/podbox.desired.XXXXXX)" || {
+		rm -f "$TMP"
+		exit 1
+	}
+	printf '%s\n' "$DESIRED_LINES" | awk '!seen[$0]++' >"$TMP_DESIRED"
+
+	# collect option numbers from desired dhcp-option lines and append alternations to the pattern
+	while IFS= read -r line; do
+		case "$line" in
+		dhcp-option[=:]*)
+			# extract the numeric option id (leading digits after dhcp-option= or dhcp-option:)
+			num=$(printf '%s' "$line" | sed -n 's/^[[:space:]]*dhcp-option[=:]\([0-9][0-9]*\).*/\1/p')
+			if [ -n "$num" ]; then
+				# match either = or : separators, followed by the option number, and then end or separator
+				# Note: we include possible separators (comma or colon) or end-of-line so we don't touch
+				# e.g. dhcp-option=114,dhcp-option=114:...
+				# append with alternation
+				EXCLUDE_PATTERN="${EXCLUDE_PATTERN}|^[[:space:]]*#?[[:space:]]*dhcp-option[=:]${num}($|[[:space:]]|,|:)"
+			fi
+			;;
+		*)
+			# other lines (like dhcp-script) already covered
+			;;
+		esac
+	done <"$TMP_DESIRED"
+
+	# create the new file contents by removing any matching lines, then append desired lines
+	# note: use grep -v -E with our built pattern and redirect to a temp file first
+	grep -v -E "$EXCLUDE_PATTERN" "$FILE" >"$TMP" || true
+
+	# append desired lines (preserve the order from DESIRED_LINES)
+	printf '\n' >>"$TMP"
+	CLEANED="$(mktemp /tmp/podbox.cleaned.XXXXXX)" || exit 1
+	grep -v '^$' "$TMP" >"$CLEANED" || true
+	mv "$CLEANED" "$TMP"
+
+	cat "$TMP_DESIRED" >>"$TMP"
+
+	# atomically replace the original file
 	mv "$TMP" "$FILE"
 	chmod 644 "$FILE"
+
+	# cleanup
+	rm -f "$TMP_DESIRED" || true
 else
-	echo "Error, podbox.conf does not exist in dnsmasq config"
-	exit -1
+	echo "Error: $FILE does not exist in dnsmasq config" >&2
+	exit 1
 fi
 
 exit 0
