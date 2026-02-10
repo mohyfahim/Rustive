@@ -2,7 +2,7 @@
 ## NOTE:
 ## we depend on monir package, so the dhcp-script should be configured already.
 set -e
-
+set -x
 # file to modify
 FILE="/etc/NetworkManager/dnsmasq-shared.d/podbox.conf"
 DIR="$(dirname "$FILE")"
@@ -67,16 +67,16 @@ if [ -f "$FILE" ]; then
 	printf '\n' >>"$TMP"
 	CLEANED="$(mktemp /tmp/podbox.cleaned.XXXXXX)" || exit 1
 	grep -v '^$' "$TMP" >"$CLEANED" || true
-	mv "$CLEANED" "$TMP"
+	cp "$CLEANED" "$TMP"
 
 	cat "$TMP_DESIRED" >>"$TMP"
 
 	# atomically replace the original file
-	mv "$TMP" "$FILE"
+	cp "$TMP" "$FILE"
 	chmod 644 "$FILE"
 
 	# cleanup
-	rm -f "$TMP_DESIRED" || true
+	# rm -f "$TMP_DESIRED" || true
 else
 	echo "Error: $FILE does not exist in dnsmasq config" >&2
 	exit 1
