@@ -1,0 +1,15 @@
+[build]
+build-std = ["std", "core", "alloc", "panic_abort"]
+build-std-features = ["panic_abort"]
+
+[target.mipsel-unknown-linux-musl]
+image = "ghcr.io/cross-rs/mipsel-unknown-linux-musl:main"
+build-std = ["std", "core", "alloc", "panic_abort"]   
+build-std-features = ["panic_abort"]
+rustflags = [
+    "-C", "opt-level=z",
+    "-C", "lto=yes",
+    "-C", "codegen-units=1",
+    "-C", "panic=abort",
+    "-C", "strip=symbols",   # nightly only
+]
