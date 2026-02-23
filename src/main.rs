@@ -38,8 +38,10 @@ use serde::Serialize;
 use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::fmt::format;
+use std::fs;
 use std::io;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -53,16 +55,16 @@ use tower_http::cors::CorsLayer;
 use crate::entity::client;
 use crate::errors::RustiveError;
 use crate::utils::execute_shell_script;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 struct Config {
     listen_addr: String,
     captive_url: String,
     lan_iface: String,
     wan_iface: String,
-    // simple whitelists
     allowed_ips: Vec<String>,
     allowed_hosts: Vec<String>,
-    // path to persist authorized macs
     db_path: String,
 }
 
@@ -77,6 +79,39 @@ impl Default for Config {
             allowed_hosts: vec!["updates.example.com".into()],
             db_path: "sqlite:///var/lib/rustive/db.db?mode=rwc".into(),
         }
+    }
+}
+
+impl Config {
+    pub fn load_config() -> Result<Self, std::io::Error> {
+        // Priority 1: env var
+        if let Ok(p) = std::env::var("RUSTIVE_CONFIG") {
+            let s = std::fs::read_to_string(&p)?;
+            let cfg: Config = toml::from_str(&s)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            return Ok(cfg);
+        }
+
+        // Priority 2: /etc/rustive/config.toml
+        let etc = PathBuf::from("/etc/rustive/config.toml");
+        if etc.exists() {
+            let s = std::fs::read_to_string(&etc)?;
+            let cfg: Config = toml::from_str(&s)
+                .map_err(|e| std::io::Error::new(io::ErrorKind::InvalidData, e))?;
+            return Ok(cfg);
+        }
+
+        // Priority 3: ./config.toml (cwd)
+        let local = PathBuf::from("config.toml");
+        if local.exists() {
+            let s = fs::read_to_string(&local)?;
+            let cfg: Config =
+                toml::from_str(&s).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            return Ok(cfg);
+        }
+
+        // Fallback: default
+        Ok(Config::default())
     }
 }
 
@@ -310,7 +345,7 @@ async fn main() -> Result<(), RustiveError> {
     env_logger::init();
     info!("Rustive Program is Starting");
 
-    let config = Config::default();
+    let config = Config::load_config().expect("failed to load config");
 
     let conn = Database::connect(&config.db_path.clone())
         .await
@@ -422,6 +457,8 @@ async fn main() -> Result<(), RustiveError> {
                 .allow_methods(Any)
                 .allow_headers(Any),
         );
+
+    debug!("Server is going to Running on {}", &config.listen_addr);
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr)
         .await
