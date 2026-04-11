@@ -1,0 +1,41 @@
+#!/bin/sh /etc/rc.common
+
+# START=95 ensures it runs after the network (20) and 
+# most other system services are fully initialized.
+START=95
+STOP=10
+
+USE_PROCD=1
+
+start_service() {
+    # Wait for the network to be truly 'up' (optional but safer)
+    # This prevents the app from starting while interfaces are still flapping.
+    procd_open_instance
+    
+    # Path to your Rust binary
+    procd_set_param command /usr/bin/rustive
+    
+    # Respawn: If the process dies, Procd will restart it.
+    # Parameters: <threshold> <timeout> <retry>
+    # This waits 5 seconds before restarting, retrying forever.
+    procd_set_param respawn ${respawn_threshold:-3600} ${respawn_timeout:-5} ${respawn_retry:-0}
+
+    # Redirect stdout and stderr to the system log (view with 'logread')
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+
+    # Optional: Set environment variables if needed
+    procd_set_param env RUST_LOG=debug
+
+    procd_close_instance
+}
+
+stop_service() {
+    # Procd handles SIGTERM automatically, but you can add custom cleanup here
+    return 0
+}
+
+# This allows the service to reload if the network interface changes
+#service_triggers() {
+#    procd_add_reload_interface_trigger "wan"
+#}

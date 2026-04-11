@@ -68,6 +68,15 @@ struct Config {
     db_path: String,
 }
 
+#[cfg(all(target_arch = "mips", target_endian = "little"))]
+const DEFAULT_DB_PATH: &str = "sqlite:///tmp/rustive.db?mode=rwc";
+
+#[cfg(all(target_arch = "aarch64"))]
+const DEFAULT_DB_PATH: &str = "sqlite:///var/lib/rustive/db.db?mode=rwc";
+
+#[cfg(not(any(target_arch = "mips", target_arch = "aarch64")))]
+const DEFAULT_DB_PATH: &str = "sqlite:///var/lib/rustive/db.db?mode=rwc";
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -77,7 +86,7 @@ impl Default for Config {
             wan_iface: "eth1".into(),
             allowed_ips: vec!["8.8.8.8".into()],
             allowed_hosts: vec!["updates.example.com".into()],
-            db_path: "sqlite:///var/lib/rustive/db.db?mode=rwc".into(),
+            db_path: DEFAULT_DB_PATH.into(),
         }
     }
 }
