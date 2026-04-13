@@ -26,6 +26,7 @@ use sea_orm::ActiveModelTrait;
 use sea_orm::ActiveValue::Set;
 use sea_orm::ColIdx;
 use sea_orm::ColumnTrait;
+use sea_orm::ConnectOptions;
 use sea_orm::DbConn;
 use sea_orm::EntityTrait;
 use sea_orm::QueryFilter;
@@ -355,8 +356,9 @@ async fn main() -> Result<(), RustiveError> {
     info!("Rustive Program is Starting");
 
     let config = Config::load_config().expect("failed to load config");
-
-    let conn = Database::connect(&config.db_path.clone())
+    let mut db_opt = ConnectOptions::new(&config.db_path.clone());
+    db_opt.sqlx_logging(false);
+    let conn = Database::connect(db_opt)
         .await
         .expect("Database Connection Failed");
     if let Err(e) = migration::Migrator::up(&conn, None).await {
@@ -565,10 +567,7 @@ async fn api_authorize(state: State<AppState>, headers: HeaderMap) -> impl IntoR
     //     }
     // }
 
-    #[cfg(any(
-        all(target_arch = "aarch64", target_os = "linux"),
-        all(target_arch = "mips", target_os = "linux"),
-    ))]
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
     {
         debug!("start giving access");
         let result = execute_shell_script(
@@ -584,7 +583,17 @@ async fn api_authorize(state: State<AppState>, headers: HeaderMap) -> impl IntoR
         .await;
         debug!("{:?}", result);
     }
-
+    #[cfg(all(target_arch = "mips", target_endian = "little"))]
+    {
+        debug!("start giving access");
+        let result = execute_shell_script(
+            "/usr/bin/white_list.sh",
+            vec!["add".to_string(), ip_for_task],
+            Duration::from_secs(10),
+        )
+        .await;
+        debug!("{:?}", result);
+    }
     (
         StatusCode::OK,
         axum::Json(
