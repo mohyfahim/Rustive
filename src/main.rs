@@ -565,7 +565,10 @@ async fn api_authorize(state: State<AppState>, headers: HeaderMap) -> impl IntoR
     //     }
     // }
 
-    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+    #[cfg(any(
+        all(target_arch = "aarch64", target_os = "linux"),
+        all(target_arch = "mips", target_os = "linux"),
+    ))]
     {
         debug!("start giving access");
         let result = execute_shell_script(

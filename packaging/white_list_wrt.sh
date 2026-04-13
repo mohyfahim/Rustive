@@ -28,9 +28,10 @@ get_section_id() {
 
 # 2. List IPs
 list_ips() {
-	SECTION=$(get_section_id)
+	# SECTION=$(get_section_id)
 	echo "IPs in $IPSET_NAME (UCI Config):"
-	uci -q get $CONFIG.$SECTION.entry
+	# uci -q get $CONFIG.$SECTION.entry
+	nft list set inet fw4 authorized_clients
 }
 
 # 3. Add IP
@@ -41,18 +42,20 @@ add_ip() {
 		usage
 	fi
 
-	SECTION=$(get_section_id)
+	# SECTION=$(get_section_id)
 
 	# Check if IP already exists to prevent duplicates (optional logic)
-	EXISTING=$(uci -q get $CONFIG.$SECTION.entry | grep -w "$IP")
-	if [ -n "$EXISTING" ]; then
-		echo "IP $IP is already in the list."
-		exit 0
-	fi
+	# EXISTING=$(uci -q get $CONFIG.$SECTION.entry | grep -w "$IP")
+	# if [ -n "$EXISTING" ]; then
+	# 	echo "IP $IP is already in the list."
+	# 	exit 0
+	# fi
 
-	echo "Adding $IP to $IPSET_NAME..."
-	uci add_list $CONFIG.$SECTION.entry="$IP"
-	apply_changes
+	# echo "Adding $IP to $IPSET_NAME..."
+	# uci add_list $CONFIG.$SECTION.entry="$IP"
+	# apply_changes
+
+	nft add element inet fw4 authorized_clients { $IP }
 }
 
 # 4. Commit and Reload
@@ -74,12 +77,14 @@ del_ip() {
 		usage
 	fi
 
-	SECTION=$(get_section_id)
+	# SECTION=$(get_section_id)
 
-	echo "Removing $IP from $IPSET_NAME..."
-	# del_list removes the entry matching the value
-	uci del_list $CONFIG.$SECTION.entry="$IP"
-	apply_changes
+	# echo "Removing $IP from $IPSET_NAME..."
+	# # del_list removes the entry matching the value
+	# uci del_list $CONFIG.$SECTION.entry="$IP"
+	# apply_changes
+	nft delete element inet fw4 authorized_clients { $IP }
+
 }
 
 # Main Logic
