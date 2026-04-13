@@ -565,10 +565,7 @@ async fn api_authorize(state: State<AppState>, headers: HeaderMap) -> impl IntoR
     //     }
     // }
 
-    #[cfg(any(
-        all(target_arch = "aarch64", target_os = "linux"),
-        all(target_arch = "mips", target_os = "linux"),
-    ))]
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
     {
         debug!("start giving access");
         let result = execute_shell_script(
@@ -584,7 +581,17 @@ async fn api_authorize(state: State<AppState>, headers: HeaderMap) -> impl IntoR
         .await;
         debug!("{:?}", result);
     }
-
+    #[cfg(all(target_arch = "mips", target_endian = "little"))]
+    {
+        debug!("start giving access");
+        let result = execute_shell_script(
+            "/usr/bin/white_list.sh",
+            vec!["add".to_string(), ip_for_task],
+            Duration::from_secs(10),
+        )
+        .await;
+        debug!("{:?}", result);
+    }
     (
         StatusCode::OK,
         axum::Json(
