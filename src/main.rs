@@ -353,7 +353,7 @@ async fn create_ping_timer_if_missing(state: State<AppState>, mac: String) {
 #[tokio::main]
 async fn main() -> Result<(), RustiveError> {
     env_logger::init();
-    info!("Rustive Program is Starting");
+    info!("Rustive Program is Starting...");
 
     let config = Config::load_config().expect("failed to load config");
     let mut db_opt = ConnectOptions::new(&config.db_path.clone());
@@ -870,6 +870,22 @@ async fn api_dhcp(
                             ip_for_task,
                             mac_for_task,
                         ],
+                        Duration::from_secs(10),
+                    )
+                    .await;
+                    debug!("{:?}", result);
+                } else {
+                    debug!("here2 to run script");
+                }
+            }
+
+            #[cfg(all(target_arch = "mips", target_endian = "little"))]
+            {
+                if client_auth == true {
+                    debug!("start giving access");
+                    let result = execute_shell_script(
+                        "/usr/bin/white_list.sh",
+                        vec!["add".to_string(), ip_for_task],
                         Duration::from_secs(10),
                     )
                     .await;
