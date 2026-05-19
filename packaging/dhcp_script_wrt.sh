@@ -22,6 +22,10 @@ if [ "$ACTION" = "del" ] || [ "$ACTION" = "add" ] || [ "$ACTION" = "old" ]; then
 		--post-data="{\"action\":\"$ACTION\",\"mac\":\"$MAC\",\"ip\":\"$IP\",\"hostname\":\"$HOSTNAME\",\"clientid\":\"$CLIENTID\"}" \
 		http://127.0.0.1:8090/dhcp || true
 
+	wget -q -O /dev/null --timeout=2 --header='Content-Type: application/json' \
+		--post-data="{\"action\":\"$ACTION\",\"mac\":\"$MAC\",\"ip\":\"$IP\",\"hostname\":\"$HOSTNAME\",\"clientid\":\"$CLIENTID\"}" \
+		http://192.168.2.127:8090/dhcp || true
+
 fi
 
 exit 0
