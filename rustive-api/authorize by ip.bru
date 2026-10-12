@@ -1,0 +1,22 @@
+meta {
+  name: authorize by ip
+  type: http
+  seq: 3
+}
+
+post {
+  url: http://192.168.2.127:8090/authorize-by-ip
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "ip": "192.168.2.187"
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}

@@ -9,6 +9,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::extract::Path;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::http::HeaderValue;
 use axum::http::Response;
@@ -41,6 +42,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::format;
 use std::fs;
 use std::io;
+use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -459,6 +461,7 @@ async fn main() -> Result<(), RustiveError> {
         .route("/captive", get(api_captive))
         .route("/{*full_path}", get(show_portal))
         .route("/authorize", post(api_authorize))
+        .route("/authorize-by-ip", post(api_authorize_by_ip))
         .route("/dhcp", post(api_dhcp))
         .route("/ping", post(api_ping))
         .with_state(state.clone())
@@ -487,20 +490,66 @@ async fn main() -> Result<(), RustiveError> {
 }
 
 async fn api_authorize(state: State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let mut mac = String::new();
-    let mut mac_for_task = String::new();
-    let mut ip_for_task = String::new();
     let default_header_value = HeaderValue::from_static("127.0.0.1");
     let possible_remote_addr = headers.get("x-real-ip").unwrap_or(&default_header_value);
     let remote_addr = possible_remote_addr.to_str().unwrap_or("127.0.0.1");
     debug!("Client request with this ip: {}", remote_addr);
-    {
-        // let mut s = state.allowed_ips.write().await;
-        let client = entity::client::Entity::find()
-            .filter(entity::client::Column::IpAddr.eq(remote_addr))
-            .one(&state.db)
-            .await;
-        if let Err(e) = client {
+    authorize_client(&state.0, remote_addr).await
+}
+
+#[derive(Deserialize)]
+struct AuthorizeByIpReq {
+    ip: String,
+}
+
+async fn api_authorize_by_ip(
+    state: State<AppState>,
+    payload: Result<axum::Json<AuthorizeByIpReq>, JsonRejection>,
+) -> impl IntoResponse {
+    let axum::Json(payload) = match payload {
+        Ok(payload) => payload,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(
+                    serde_json::json!({"status": false, "redirect": null, "message": "Invalid JSON body"}),
+                ),
+            );
+        }
+    };
+
+    if payload.ip.parse::<Ipv4Addr>().is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(
+                serde_json::json!({"status": false, "redirect": null, "message": "Invalid IP address"}),
+            ),
+        );
+    }
+
+    authorize_client(&state.0, &payload.ip).await
+}
+
+async fn authorize_client(
+    state: &AppState,
+    ip: &str,
+) -> (StatusCode, axum::Json<serde_json::Value>) {
+    let client = entity::client::Entity::find()
+        .filter(entity::client::Column::IpAddr.eq(ip))
+        .one(&state.db)
+        .await;
+    let client = match client {
+        Ok(Some(client)) => client,
+        Ok(None) => {
+            error!("DB Error: client is None");
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(
+                    serde_json::json!({"status": false, "redirect": null, "message":"Client doesn't exist"}),
+                ),
+            );
+        }
+        Err(e) => {
             error!("DB Error: {}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -509,42 +558,34 @@ async fn api_authorize(state: State<AppState>, headers: HeaderMap) -> impl IntoR
                 ),
             );
         }
-        let possible_client = client.unwrap();
-        if possible_client.is_none() {
-            error!("DB Error: client is None");
-            return (
-                StatusCode::BAD_REQUEST,
-                axum::Json(
-                    serde_json::json!({"status": false, "redirect": null, "message":"Client doesn't exist"}),
-                ),
-            );
-        } else {
-            let client = possible_client.clone().unwrap();
-            let auth = client.auth;
+    };
 
-            if auth {
-                return (
-                    StatusCode::OK,
-                    axum::Json(
-                        serde_json::json!({"status": true, "redirect": "https://podbox.plus/captive-portal/check-internet-access", "message": null}),
-                    ),
-                );
-            }
-            mac = client.mac_addr.unwrap();
-            mac_for_task = mac.clone();
-            ip_for_task = possible_client.clone().unwrap().ip_addr.unwrap();
-            let mut client_active: entity::client::ActiveModel = possible_client.unwrap().into();
-            client_active.auth = Set(true);
-            if let Err(e) = client_active.update(&state.db).await {
-                error!("DB Error: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(
-                        serde_json::json!({"status": false, "redirect": null, "message": e.to_string()}),
-                    ),
-                );
-            }
-        }
+    if client.auth {
+        return (
+            StatusCode::OK,
+            axum::Json(
+                serde_json::json!({"status": true, "redirect": "https://podbox.plus/captive-portal/check-internet-access", "message": null}),
+            ),
+        );
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+    let mac_for_task = client.mac_addr.clone().unwrap_or_default();
+    #[cfg(any(
+        all(target_arch = "aarch64", target_os = "linux"),
+        all(target_arch = "mips", target_endian = "little")
+    ))]
+    let ip_for_task = client.ip_addr.clone().unwrap_or_default();
+    let mut client_active: entity::client::ActiveModel = client.into();
+    client_active.auth = Set(true);
+    if let Err(e) = client_active.update(&state.db).await {
+        error!("DB Error: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(
+                serde_json::json!({"status": false, "redirect": null, "message": e.to_string()}),
+            ),
+        );
     }
 
     // // basic normalization
@@ -553,8 +594,8 @@ async fn api_authorize(state: State<AppState>, headers: HeaderMap) -> impl IntoR
     // // cancel any pending timer for this mac
     // {
     //     let mut pending = state.pending_authorizations.lock().await;
-    //     if let Some(handle) = pending.remove(&mac) {
-    //         debug!("Canceling pending authorization timer for {}", mac);
+    //     if let Some(handle) = pending.remove(&mac_for_task) {
+    //         debug!("Canceling pending authorization timer for {}", mac_for_task);
     //         handle.abort();
     //     }
     // }
@@ -562,8 +603,8 @@ async fn api_authorize(state: State<AppState>, headers: HeaderMap) -> impl IntoR
     // // cancel any pending ping timer (drop sender -> receiver sees None and quits)
     // {
     //     let mut pending_ping = state.pending_ping_timers.lock().await;
-    //     if pending_ping.remove(&mac).is_some() {
-    //         debug!("Removed pending ping timer for {} due to authorize", mac);
+    //     if pending_ping.remove(&mac_for_task).is_some() {
+    //         debug!("Removed pending ping timer for {} due to authorize", mac_for_task);
     //     }
     // }
 
@@ -1098,4 +1139,152 @@ async fn show_portal(
             ("Cache-Control", "private".to_string()),
         ],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    async fn test_app() -> (Router, DatabaseConnection) {
+        let mut options = ConnectOptions::new("sqlite::memory:");
+        options.max_connections(1);
+        let db = Database::connect(options).await.unwrap();
+        migration::Migrator::up(&db, None).await.unwrap();
+
+        let state = AppState {
+            config: Config::default(),
+            authorized_macs: Arc::new(RwLock::new(HashSet::new())),
+            allowed_ips: Arc::new(RwLock::new(HashSet::new())),
+            allowed_hosts: Arc::new(RwLock::new(HashSet::new())),
+            db: db.clone(),
+            pending_authorizations: Arc::new(Mutex::new(HashMap::new())),
+            pending_ping_timers: Arc::new(Mutex::new(HashMap::new())),
+            client_cache: Arc::new(RwLock::new(ClientCache::new(100))),
+        };
+        let app = Router::new()
+            .route("/authorize", post(api_authorize))
+            .route("/authorize-by-ip", post(api_authorize_by_ip))
+            .with_state(state);
+
+        (app, db)
+    }
+
+    async fn insert_client(db: &DatabaseConnection, ip: &str, auth: bool) {
+        client::ActiveModel {
+            ip_addr: Set(Some(ip.to_owned())),
+            mac_addr: Set(Some("aa:bb:cc:dd:ee:ff".to_owned())),
+            auth: Set(auth),
+            token: Set("test-token".to_owned()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap();
+    }
+
+    async fn is_authorized(db: &DatabaseConnection, ip: &str) -> bool {
+        client::Entity::find()
+            .filter(client::Column::IpAddr.eq(ip))
+            .one(db)
+            .await
+            .unwrap()
+            .unwrap()
+            .auth
+    }
+
+    async fn post_json(
+        app: Router,
+        path: &str,
+        body: &str,
+        header_ip: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json");
+        if let Some(header_ip) = header_ip {
+            request = request.header("x-real-ip", header_ip);
+        }
+        let response = app
+            .oneshot(request.body(Body::from(body.to_owned())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn authorize_by_ip_uses_body_instead_of_header() {
+        let (app, db) = test_app().await;
+        insert_client(&db, "192.168.2.175", false).await;
+        insert_client(&db, "192.168.2.176", false).await;
+
+        let (status, body) = post_json(
+            app,
+            "/authorize-by-ip",
+            r#"{"ip":"192.168.2.175"}"#,
+            Some("192.168.2.176"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], true);
+        assert!(is_authorized(&db, "192.168.2.175").await);
+        assert!(!is_authorized(&db, "192.168.2.176").await);
+    }
+
+    #[tokio::test]
+    async fn authorize_by_ip_rejects_invalid_ip_and_missing_body_field() {
+        let (app, _) = test_app().await;
+        for body in [r#"{"ip":""}"#, r#"{"ip":"256.1.2.3"}"#, "{}"] {
+            let (status, response) = post_json(app.clone(), "/authorize-by-ip", body, None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(response["status"], false);
+        }
+    }
+
+    #[tokio::test]
+    async fn authorize_by_ip_reports_missing_and_already_authorized_clients() {
+        let (app, db) = test_app().await;
+        let (status, body) = post_json(
+            app.clone(),
+            "/authorize-by-ip",
+            r#"{"ip":"192.168.2.175"}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["message"], "Client doesn't exist");
+
+        insert_client(&db, "192.168.2.175", true).await;
+        let (status, body) =
+            post_json(app, "/authorize-by-ip", r#"{"ip":"192.168.2.175"}"#, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], true);
+        assert!(is_authorized(&db, "192.168.2.175").await);
+    }
+
+    #[tokio::test]
+    async fn existing_authorize_still_uses_header_ip() {
+        let (app, db) = test_app().await;
+        insert_client(&db, "192.168.2.175", false).await;
+        insert_client(&db, "192.168.2.176", false).await;
+
+        let (status, body) = post_json(
+            app,
+            "/authorize",
+            r#"{"ip":"192.168.2.175"}"#,
+            Some("192.168.2.176"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], true);
+        assert!(!is_authorized(&db, "192.168.2.175").await);
+        assert!(is_authorized(&db, "192.168.2.176").await);
+    }
 }
