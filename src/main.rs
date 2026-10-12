@@ -1029,17 +1029,14 @@ async fn api_captive(
             [
                 (
                     "Location",
-                    format!(
-                        "https://podbox.plus/captive-portal/user-guide?token={}",
-                        token
-                    ),
+                    format!("https://podbox.plus/captive-portal/login?token={}", token),
                 ),
                 ("Content-Type", "application/captive+json".to_string()),
                 ("Cache-Control", "private".to_string()),
             ],
             format!(
                 "{{\"captive\": false, \"user-portal-url\": \
-                \"https://podbox.plus/captive-portal/user-guide?token={}\", \"venue-info-url\":\"https://podbox.plus/\",\
+                \"https://podbox.plus/captive-portal/login?token={}\", \"venue-info-url\":\"https://podbox.plus/\",\
                  \"seconds-remaining\": 3600, \"can-extend-session\": true}}",
                 token
             ),
@@ -1050,16 +1047,13 @@ async fn api_captive(
             [
                 (
                     "Location",
-                    format!(
-                        "https://podbox.plus/captive-portal/user-guide?token={}",
-                        token
-                    ),
+                    format!("https://podbox.plus/captive-portal/login?token={}", token),
                 ),
                 ("Content-Type", "application/captive+json".to_string()),
                 ("Cache-Control", "private".to_string()),
             ],
             format!(
-                "{{\"captive\": true, \"user-portal-url\": \"https://podbox.plus/captive-portal/user-guide?token={}\", \"venue-info-url\":\"https://podbox.plus/\"}}",
+                "{{\"captive\": true, \"user-portal-url\": \"https://podbox.plus/captive-portal/login?token={}\", \"venue-info-url\":\"https://podbox.plus/\"}}",
                 token
             ),
         )
@@ -1099,10 +1093,7 @@ async fn show_portal(
         [
             (
                 "Location",
-                format!(
-                    "https://podbox.plus/captive-portal/user-guide?token={}",
-                    token
-                ),
+                format!("https://podbox.plus/captive-portal/login?token={}", token),
             ),
             ("Cache-Control", "private".to_string()),
         ],

@@ -3,7 +3,7 @@
 set -e # Exit on any error
 
 APP_NAME="rustive"
-VERSION="0.1.0"
+VERSION="0.3.0"
 # CRITICAL: Change this to match your OpenWrt router's exact architecture string
 OPENWRT_ARCH="mipsel_24kc"
 TARGET="mipsel-unknown-linux-musl"
