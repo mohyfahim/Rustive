@@ -84,7 +84,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             listen_addr: "0.0.0.0:8090".into(),
-            captive_url: "http://auth.local:8080/portal".into(),
+            captive_url: "https://podbox.plus/captive-portal/login?token={}".into(),
             lan_iface: "eth0".into(),
             wan_iface: "eth1".into(),
             allowed_ips: vec!["8.8.8.8".into()],
@@ -95,31 +95,41 @@ impl Default for Config {
 }
 
 impl Config {
+    fn parse(s: &str) -> Result<Self, io::Error> {
+        let config: Self =
+            toml::from_str(s).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        if config.captive_url.matches("{}").count() != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "captive_url must contain exactly one {} token placeholder",
+            ));
+        }
+        Ok(config)
+    }
+
+    fn portal_url(&self, token: &str) -> String {
+        self.captive_url.replacen("{}", token, 1)
+    }
+
     pub fn load_config() -> Result<Self, std::io::Error> {
         // Priority 1: env var
         if let Ok(p) = std::env::var("RUSTIVE_CONFIG") {
             let s = std::fs::read_to_string(&p)?;
-            let cfg: Config = toml::from_str(&s)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            return Ok(cfg);
+            return Self::parse(&s);
         }
 
         // Priority 2: /etc/rustive/config.toml
         let etc = PathBuf::from("/etc/rustive/config.toml");
         if etc.exists() {
             let s = std::fs::read_to_string(&etc)?;
-            let cfg: Config = toml::from_str(&s)
-                .map_err(|e| std::io::Error::new(io::ErrorKind::InvalidData, e))?;
-            return Ok(cfg);
+            return Self::parse(&s);
         }
 
         // Priority 3: ./config.toml (cwd)
         let local = PathBuf::from("config.toml");
         if local.exists() {
             let s = fs::read_to_string(&local)?;
-            let cfg: Config =
-                toml::from_str(&s).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            return Ok(cfg);
+            return Self::parse(&s);
         }
 
         // Fallback: default
@@ -1064,41 +1074,25 @@ async fn api_captive(
     }
 
     debug!("captive api: {ip_str}, {token}, {auth}");
+    let portal_url = state.config.portal_url(&token);
+    let mut body = serde_json::json!({
+        "captive": !auth,
+        "user-portal-url": portal_url,
+        "venue-info-url": "https://podbox.plus/",
+    });
     if auth {
-        (
-            StatusCode::OK,
-            [
-                (
-                    "Location",
-                    format!("https://podbox.plus/captive-portal/login?token={}", token),
-                ),
-                ("Content-Type", "application/captive+json".to_string()),
-                ("Cache-Control", "private".to_string()),
-            ],
-            format!(
-                "{{\"captive\": false, \"user-portal-url\": \
-                \"https://podbox.plus/captive-portal/login?token={}\", \"venue-info-url\":\"https://podbox.plus/\",\
-                 \"seconds-remaining\": 3600, \"can-extend-session\": true}}",
-                token
-            ),
-        )
-    } else {
-        (
-            StatusCode::OK,
-            [
-                (
-                    "Location",
-                    format!("https://podbox.plus/captive-portal/login?token={}", token),
-                ),
-                ("Content-Type", "application/captive+json".to_string()),
-                ("Cache-Control", "private".to_string()),
-            ],
-            format!(
-                "{{\"captive\": true, \"user-portal-url\": \"https://podbox.plus/captive-portal/login?token={}\", \"venue-info-url\":\"https://podbox.plus/\"}}",
-                token
-            ),
-        )
+        body["seconds-remaining"] = serde_json::json!(3600);
+        body["can-extend-session"] = serde_json::json!(true);
     }
+    (
+        StatusCode::OK,
+        [
+            ("Location", portal_url),
+            ("Content-Type", "application/captive+json".to_string()),
+            ("Cache-Control", "private".to_string()),
+        ],
+        body.to_string(),
+    )
 }
 
 async fn show_portal(
@@ -1132,10 +1126,7 @@ async fn show_portal(
     (
         StatusCode::FOUND,
         [
-            (
-                "Location",
-                format!("https://podbox.plus/captive-portal/login?token={}", token),
-            ),
+            ("Location", state.config.portal_url(&token)),
             ("Cache-Control", "private".to_string()),
         ],
     )
@@ -1149,13 +1140,17 @@ mod tests {
     use tower::ServiceExt;
 
     async fn test_app() -> (Router, DatabaseConnection) {
+        test_app_with_config(Config::default()).await
+    }
+
+    async fn test_app_with_config(config: Config) -> (Router, DatabaseConnection) {
         let mut options = ConnectOptions::new("sqlite::memory:");
         options.max_connections(1);
         let db = Database::connect(options).await.unwrap();
         migration::Migrator::up(&db, None).await.unwrap();
 
         let state = AppState {
-            config: Config::default(),
+            config,
             authorized_macs: Arc::new(RwLock::new(HashSet::new())),
             allowed_ips: Arc::new(RwLock::new(HashSet::new())),
             allowed_hosts: Arc::new(RwLock::new(HashSet::new())),
@@ -1165,6 +1160,8 @@ mod tests {
             client_cache: Arc::new(RwLock::new(ClientCache::new(100))),
         };
         let app = Router::new()
+            .route("/", get(show_portal))
+            .route("/captive", get(api_captive))
             .route("/authorize", post(api_authorize))
             .route("/authorize-by-ip", post(api_authorize_by_ip))
             .with_state(state);
@@ -1215,6 +1212,73 @@ mod tests {
         let status = response.status();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    async fn get_with_ip(app: Router, path: &str, ip: &str) -> Response<Body> {
+        let mut request = Request::builder()
+            .uri(path)
+            .header("x-real-ip", ip)
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(ip.parse().unwrap(), 12345)));
+        app.oneshot(request).await.unwrap()
+    }
+
+    #[test]
+    fn captive_url_config_defaults_and_rejects_missing_placeholder() {
+        let config = Config::parse("").unwrap();
+        assert_eq!(
+            config.portal_url("test-token"),
+            "https://podbox.plus/captive-portal/login?token=test-token"
+        );
+        assert_eq!(
+            Config::parse(include_str!("../packaging/config.toml"))
+                .unwrap()
+                .captive_url,
+            config.captive_url
+        );
+
+        let error = Config::parse("captive_url = 'https://example.test/login'").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("captive_url"));
+    }
+
+    #[tokio::test]
+    async fn captive_and_portal_use_configured_url_for_both_auth_states() {
+        let ip = "192.168.2.175";
+        let expected_url = "https://example.test/login?token=test-token&source=rustive";
+        for auth in [false, true] {
+            let mut config = Config::default();
+            config.captive_url = "https://example.test/login?token={}&source=rustive".to_owned();
+            let (app, db) = test_app_with_config(config).await;
+            insert_client(&db, ip, auth).await;
+
+            let response = get_with_ip(app.clone(), "/captive", ip).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["location"], expected_url);
+            assert_eq!(
+                response.headers()["content-type"],
+                "application/captive+json"
+            );
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["captive"], !auth);
+            assert_eq!(body["user-portal-url"], expected_url);
+            assert_eq!(body["venue-info-url"], "https://podbox.plus/");
+            if auth {
+                assert_eq!(body["seconds-remaining"], 3600);
+                assert_eq!(body["can-extend-session"], true);
+            } else {
+                assert!(body.get("seconds-remaining").is_none());
+                assert!(body.get("can-extend-session").is_none());
+            }
+
+            let response = get_with_ip(app, "/", ip).await;
+            assert_eq!(response.status(), StatusCode::FOUND);
+            assert_eq!(response.headers()["location"], expected_url);
+        }
     }
 
     #[tokio::test]

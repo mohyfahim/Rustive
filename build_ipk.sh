@@ -25,6 +25,8 @@ chmod 755 $STAGING_DIR/data/usr/bin/capture.sh
 cp packaging/white_list_wrt.sh $STAGING_DIR/data/usr/bin/white_list.sh
 chmod 755 $STAGING_DIR/data/usr/bin/white_list.sh
 mkdir -p $STAGING_DIR/data/etc/rustive
+cp packaging/config.toml $STAGING_DIR/data/etc/rustive/config.toml
+chmod 644 $STAGING_DIR/data/etc/rustive/config.toml
 cp packaging/dhcp_script_wrt.sh $STAGING_DIR/data/etc/rustive/dhcp_script.sh
 chmod 755 $STAGING_DIR/data/etc/rustive/dhcp_script.sh
 
@@ -43,6 +45,7 @@ Section: utils
 Priority: optional
 Description: My Rust application compiled for OpenWrt Mipsel.
 EOF
+printf '/etc/rustive/config.toml\n' >$STAGING_DIR/control/conffiles
 
 # 3. Compress the Archives
 echo "🗜️ Compressing archives..."

@@ -63,6 +63,11 @@ assets = [
     "0644",
   ],
   [
+    "packaging/config.toml",
+    "etc/rustive/config.toml",
+    "0644",
+  ],
+  [
     "files/etc/sudoers.d/rustive-iptables",
     "etc/sudoers.d/rustive-iptables",
     "0644",
